@@ -1,0 +1,741 @@
+# Australian Legal Logging and Audit System for LegalLLM Professional
+# Phase 4: Comprehensive log aggregation for Australian legal compliance requirements
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: australian-legal-logging-config
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+    compliance.australian-legal: "true"
+data:
+  # Australian Legal Compliance Requirements
+  LOG_RETENTION_YEARS: "7"  # Australian legal requirement
+  AUDIT_LOG_ENCRYPTION: "AES-256-GCM"
+  COMPLIANCE_FRAMEWORKS: "family_law_act_1975,privacy_act_1988,australian_privacy_principles"
+  
+  # Log Categories for Australian Legal Practice
+  ACCESS_LOG_ENABLED: "true"
+  AUDIT_LOG_ENABLED: "true"
+  COMPLIANCE_LOG_ENABLED: "true"
+  DOCUMENT_ACCESS_LOG_ENABLED: "true"
+  AI_INTERACTION_LOG_ENABLED: "true"
+  FINANCIAL_ANALYSIS_LOG_ENABLED: "true"
+  PRACTITIONER_VALIDATION_LOG_ENABLED: "true"
+  
+  # Performance and Storage Configuration
+  LOG_AGGREGATION_INTERVAL: "5s"
+  LOG_BATCH_SIZE: "1000"
+  LOG_COMPRESSION: "gzip"
+  
+  # Alerting Configuration
+  COMPLIANCE_VIOLATION_ALERT: "immediate"
+  UNAUTHORIZED_ACCESS_ALERT: "immediate"
+  DATA_BREACH_ALERT: "immediate"
+  
+  # ELK Stack Configuration
+  logstash.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+      
+      # Kubernetes logs
+      http {
+        port => 8080
+        codec => json
+      }
+    }
+    
+    filter {
+      # Parse Kubernetes metadata
+      if [kubernetes] {
+        mutate {
+          add_field => { 
+            "[@metadata][k8s_namespace]" => "%{[kubernetes][namespace]}"
+            "[@metadata][k8s_pod]" => "%{[kubernetes][pod][name]}"
+            "[@metadata][k8s_container]" => "%{[kubernetes][container][name]}"
+          }
+        }
+      }
+      
+      # Australian Legal Compliance Parsing
+      if [log_category] == "compliance" {
+        grok {
+          match => { 
+            "message" => "%{TIMESTAMP_ISO8601:timestamp} \[%{WORD:compliance_framework}\] %{WORD:action} %{WORD:result} user=%{WORD:user_id} practitioner=%{WORD:practitioner_number} %{GREEDYDATA:details}"
+          }
+        }
+        
+        # Validate Australian legal practitioner numbers
+        if [practitioner_number] {
+          ruby {
+            code => "
+              practitioner = event.get('practitioner_number')
+              if practitioner && practitioner.match(/^[A-Z]{2}\d{6}$/)
+                event.set('practitioner_valid', true)
+              else
+                event.set('practitioner_valid', false)
+                event.set('compliance_alert', 'invalid_practitioner_number')
+              end
+            "
+          }
+        }
+        
+        # Australian legal compliance enrichment
+        mutate {
+          add_field => {
+            "legal_jurisdiction" => "australia"
+            "compliance_category" => "professional_standards"
+            "retention_period" => "7_years"
+          }
+        }
+      }
+      
+      # A2A Protocol Performance Logging
+      if [log_category] == "a2a_protocol" {
+        grok {
+          match => { 
+            "message" => "%{TIMESTAMP_ISO8601:timestamp} A2A_LATENCY agent=%{WORD:agent_id} latency_ms=%{NUMBER:latency_ms} status=%{WORD:status}"
+          }
+        }
+        
+        # Alert on latency SLA violation
+        if [latency_ms] and [latency_ms] > 50 {
+          mutate {
+            add_field => { "performance_alert" => "a2a_latency_exceeded" }
+            add_field => { "alert_severity" => "warning" }
+          }
+        }
+      }
+      
+      # Document Processing Logging
+      if [log_category] == "document_processing" {
+        grok {
+          match => { 
+            "message" => "%{TIMESTAMP_ISO8601:timestamp} DOC_PROCESS batch_size=%{NUMBER:batch_size} processing_time=%{NUMBER:processing_time} status=%{WORD:status}"
+          }
+        }
+        
+        # Alert on document processing SLA violation
+        if [batch_size] and [processing_time] and [batch_size] >= 500 and [processing_time] > 90 {
+          mutate {
+            add_field => { "performance_alert" => "document_processing_sla_exceeded" }
+            add_field => { "alert_severity" => "critical" }
+          }
+        }
+      }
+      
+      # Financial Agent Compliance Logging
+      if [log_category] == "financial_compliance" {
+        grok {
+          match => { 
+            "message" => "%{TIMESTAMP_ISO8601:timestamp} FORM13_ANALYSIS case_id=%{WORD:case_id} compliance_score=%{NUMBER:compliance_score} violations=%{NUMBER:violations}"
+          }
+        }
+        
+        # Alert on Form 13 compliance failures
+        if [violations] and [violations] > 0 {
+          mutate {
+            add_field => { "compliance_alert" => "form13_violations_detected" }
+            add_field => { "alert_severity" => "critical" }
+          }
+        }
+      }
+      
+      # Privacy Act 1988 Compliance
+      if [log_category] == "privacy_compliance" {
+        grok {
+          match => { 
+            "message" => "%{TIMESTAMP_ISO8601:timestamp} PRIVACY_ACCESS user=%{WORD:user_id} data_type=%{WORD:data_type} action=%{WORD:action} consent=%{WORD:consent_status}"
+          }
+        }
+        
+        # Alert on privacy violations
+        if [consent_status] != "granted" and [action] == "access" {
+          mutate {
+            add_field => { "compliance_alert" => "privacy_act_1988_violation" }
+            add_field => { "alert_severity" => "critical" }
+          }
+        }
+      }
+      
+      # Add timestamp and Australian timezone
+      date {
+        match => [ "timestamp", "ISO8601" ]
+        timezone => "Australia/Sydney"
+      }
+      
+      # Encrypt sensitive fields for Australian legal compliance
+      ruby {
+        code => "
+          require 'openssl'
+          
+          sensitive_fields = ['practitioner_number', 'user_personal_data', 'case_details']
+          
+          sensitive_fields.each do |field|
+            if event.get(field)
+              cipher = OpenSSL::Cipher.new('AES-256-GCM')
+              cipher.encrypt
+              cipher.key = ENV['LOG_ENCRYPTION_KEY'] || 'default_key_change_in_production'
+              
+              encrypted_value = cipher.update(event.get(field)) + cipher.final
+              event.set(field + '_encrypted', Base64.encode64(encrypted_value))
+              event.remove(field)
+            end
+          end
+        "
+      }
+    }
+    
+    output {
+      # Send to Elasticsearch with Australian legal compliance index pattern
+      elasticsearch {
+        hosts => ["elasticsearch:9200"]
+        index => "legalllm-au-legal-%{+YYYY.MM.dd}"
+        template_name => "legalllm-au-legal"
+        template => "/usr/share/logstash/templates/australian-legal-template.json"
+        template_overwrite => true
+      }
+      
+      # Separate index for compliance logs with 7-year retention
+      if [log_category] == "compliance" or [compliance_alert] {
+        elasticsearch {
+          hosts => ["elasticsearch:9200"]
+          index => "legalllm-compliance-%{+YYYY.MM.dd}"
+          template_name => "legalllm-compliance"
+          template => "/usr/share/logstash/templates/compliance-template.json"
+          template_overwrite => true
+        }
+      }
+      
+      # Real-time alerts for critical compliance violations
+      if [alert_severity] == "critical" {
+        http {
+          url => "http://alertmanager:9093/api/v1/alerts"
+          http_method => "post"
+          content_type => "application/json"
+          mapping => {
+            "alerts" => [
+              {
+                "labels" => {
+                  "alertname" => "%{compliance_alert}"
+                  "severity" => "%{alert_severity}"
+                  "service" => "legalllm-professional"
+                  "compliance_framework" => "%{compliance_framework}"
+                }
+                "annotations" => {
+                  "summary" => "Australian Legal Compliance Alert"
+                  "description" => "%{message}"
+                }
+              }
+            ]
+          }
+        }
+      }
+      
+      # Archive to S3 for long-term Australian legal retention
+      s3 {
+        access_key_id => "${AWS_ACCESS_KEY_ID}"
+        secret_access_key => "${AWS_SECRET_ACCESS_KEY}"
+        region => "ap-southeast-4"
+        bucket => "legalllm-audit-logs-au"
+        prefix => "year=%{+YYYY}/month=%{+MM}/day=%{+dd}/hour=%{+HH}/"
+        time_file => 5
+        codec => "json_lines"
+        server_side_encryption => true
+        server_side_encryption_algorithm => "AES256"
+        tags => {
+          "compliance" => "australian_legal"
+          "retention" => "7_years"
+          "framework" => "family_law_act_1975,privacy_act_1988"
+        }
+      }
+    }
+  
+  elasticsearch-template.json: |
+    {
+      "index_patterns": ["legalllm-au-legal-*"],
+      "settings": {
+        "number_of_shards": 3,
+        "number_of_replicas": 1,
+        "index.lifecycle.name": "australian-legal-policy",
+        "index.lifecycle.rollover_alias": "legalllm-au-legal"
+      },
+      "mappings": {
+        "properties": {
+          "@timestamp": {
+            "type": "date"
+          },
+          "log_category": {
+            "type": "keyword"
+          },
+          "compliance_framework": {
+            "type": "keyword"
+          },
+          "legal_jurisdiction": {
+            "type": "keyword"
+          },
+          "practitioner_number": {
+            "type": "keyword",
+            "index": false
+          },
+          "practitioner_valid": {
+            "type": "boolean"
+          },
+          "case_id": {
+            "type": "keyword"
+          },
+          "user_id": {
+            "type": "keyword"
+          },
+          "agent_id": {
+            "type": "keyword"
+          },
+          "latency_ms": {
+            "type": "float"
+          },
+          "processing_time": {
+            "type": "float"
+          },
+          "batch_size": {
+            "type": "integer"
+          },
+          "compliance_score": {
+            "type": "float"
+          },
+          "compliance_alert": {
+            "type": "keyword"
+          },
+          "alert_severity": {
+            "type": "keyword"
+          },
+          "message": {
+            "type": "text",
+            "analyzer": "standard"
+          }
+        }
+      }
+    }
+
+---
+# Elasticsearch Deployment for Australian Legal Compliance
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+    compliance.australian-legal: "true"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+        component: logging
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9300
+          name: transport
+        env:
+        - name: cluster.name
+          value: "legalllm-au-legal"
+        - name: node.name
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: discovery.seed_hosts
+          value: "elasticsearch-0.elasticsearch-headless,elasticsearch-1.elasticsearch-headless,elasticsearch-2.elasticsearch-headless"
+        - name: cluster.initial_master_nodes
+          value: "elasticsearch-0,elasticsearch-1,elasticsearch-2"
+        - name: ES_JAVA_OPTS
+          value: "-Xms2g -Xmx2g"
+        - name: xpack.security.enabled
+          value: "true"
+        - name: xpack.security.transport.ssl.enabled
+          value: "true"
+        - name: xpack.security.http.ssl.enabled
+          value: "true"
+        - name: xpack.security.audit.enabled
+          value: "true"
+        # Australian legal compliance settings
+        - name: xpack.security.audit.logfile.events.include
+          value: "access_granted,access_denied,authentication_success,authentication_failed,index_event,security_change_event"
+        - name: indices.lifecycle.history_index_enabled
+          value: "true"
+        volumeMounts:
+        - name: elasticsearch-data
+          mountPath: /usr/share/elasticsearch/data
+        - name: elasticsearch-config
+          mountPath: /usr/share/elasticsearch/config/elasticsearch.yml
+          subPath: elasticsearch.yml
+        - name: elasticsearch-certs
+          mountPath: /usr/share/elasticsearch/config/certs
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /_cluster/health
+            port: 9200
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /_cluster/health?wait_for_status=yellow&timeout=5s
+            port: 9200
+            scheme: HTTPS
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: elasticsearch-data
+        persistentVolumeClaim:
+          claimName: elasticsearch-data-pvc
+      - name: elasticsearch-config
+        configMap:
+          name: elasticsearch-config
+      - name: elasticsearch-certs
+        secret:
+          secretName: elasticsearch-certs
+
+---
+# Logstash Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+        component: logging
+    spec:
+      containers:
+      - name: logstash
+        image: docker.elastic.co/logstash/logstash:8.11.0
+        ports:
+        - containerPort: 5044
+          name: beats
+        - containerPort: 8080
+          name: http
+        env:
+        - name: LS_JAVA_OPTS
+          value: "-Xms1g -Xmx1g"
+        - name: LOG_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: log-encryption-key
+              key: encryption-key
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-logging-credentials
+              key: access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-logging-credentials
+              key: secret-access-key
+        volumeMounts:
+        - name: logstash-config
+          mountPath: /usr/share/logstash/pipeline
+        - name: logstash-templates
+          mountPath: /usr/share/logstash/templates
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 9600
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 9600
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: logstash-config
+        configMap:
+          name: australian-legal-logging-config
+          items:
+          - key: logstash.conf
+            path: logstash.conf
+      - name: logstash-templates
+        configMap:
+          name: australian-legal-logging-config
+          items:
+          - key: elasticsearch-template.json
+            path: australian-legal-template.json
+
+---
+# Kibana Deployment for Australian Legal Analytics
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+        component: logging
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:8.11.0
+        ports:
+        - containerPort: 5601
+          name: ui
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "https://elasticsearch:9200"
+        - name: ELASTICSEARCH_USERNAME
+          value: "kibana_system"
+        - name: ELASTICSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elasticsearch-credentials
+              key: kibana-password
+        - name: SERVER_NAME
+          value: "kibana"
+        - name: SERVER_PUBLICBASEURL
+          value: "https://logs.legalllm.com.au"
+        # Australian legal compliance settings
+        - name: XPACK_SECURITY_ENCRYPTIONKEY
+          valueFrom:
+            secretKeyRef:
+              name: kibana-encryption-key
+              key: encryption-key
+        - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+          valueFrom:
+            secretKeyRef:
+              name: kibana-encryption-key
+              key: saved-objects-key
+        - name: XPACK_REPORTING_ENCRYPTIONKEY
+          valueFrom:
+            secretKeyRef:
+              name: kibana-encryption-key
+              key: reporting-key
+        volumeMounts:
+        - name: kibana-config
+          mountPath: /usr/share/kibana/config/kibana.yml
+          subPath: kibana.yml
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 120
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 60
+          periodSeconds: 10
+      volumes:
+      - name: kibana-config
+        configMap:
+          name: kibana-config
+
+---
+# Filebeat DaemonSet for log collection
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  template:
+    metadata:
+      labels:
+        app: filebeat
+        component: logging
+    spec:
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: filebeat
+        image: docker.elastic.co/beats/filebeat:8.11.0
+        args: [
+          "-c", "/etc/filebeat.yml",
+          "-e",
+        ]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: LOGSTASH_HOSTS
+          value: "logstash:5044"
+        securityContext:
+          runAsUser: 0
+        resources:
+          limits:
+            memory: 200Mi
+            cpu: 100m
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/filebeat.yml
+          readOnly: true
+          subPath: filebeat.yml
+        - name: data
+          mountPath: /usr/share/filebeat/data
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          defaultMode: 0640
+          name: filebeat-config
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: data
+        hostPath:
+          path: /var/lib/filebeat-data
+          type: DirectoryOrCreate
+
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: legalllm-multiagent
+spec:
+  clusterIP: None
+  selector:
+    app: elasticsearch
+  ports:
+  - port: 9200
+    name: http
+  - port: 9300
+    name: transport
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: legalllm-multiagent
+spec:
+  selector:
+    app: logstash
+  ports:
+  - port: 5044
+    name: beats
+  - port: 8080
+    name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: legalllm-multiagent
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:ap-southeast-4:123456789012:certificate/12345678-1234-1234-1234-123456789012
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+spec:
+  type: LoadBalancer
+  selector:
+    app: kibana
+  ports:
+  - port: 443
+    targetPort: 5601
+    name: https
+  - port: 80
+    targetPort: 5601
+    name: http
+
+---
+# PersistentVolumeClaim for Elasticsearch
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: elasticsearch-data-pvc
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: logging
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3-encrypted
+  resources:
+    requests:
+      storage: 200Gi

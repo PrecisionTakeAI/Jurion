@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: legalai-hub
+  labels:
+    name: legalai-hub
+    compliance: iso27001
+    data-sovereignty: australia
+    app.kubernetes.io/name: legalai-hub
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: namespace
+  annotations:
+    kubernetes.io/managed-by: helm
+    legal.compliance/framework: "ISO27001:2022"
+    legal.compliance/retention: "7-years"
+    legal.compliance/jurisdiction: "australia"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: legalai-hub-quota
+  namespace: legalai-hub
+spec:
+  hard:
+    requests.cpu: "16"      # 16 CPU cores for the namespace
+    requests.memory: 64Gi   # 64GB RAM for the namespace
+    limits.cpu: "32"        # Maximum 32 CPU cores
+    limits.memory: 128Gi    # Maximum 128GB RAM
+    persistentvolumeclaims: "10"
+    requests.storage: 1Ti   # 1TB storage limit
+    services: "20"
+    secrets: "50"
+    configmaps: "50"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: legalai-hub-limits
+  namespace: legalai-hub
+spec:
+  limits:
+  - default:
+      cpu: "2"
+      memory: 4Gi
+    defaultRequest:
+      cpu: "500m"
+      memory: 1Gi
+    type: Container
+  - max:
+      cpu: "8"
+      memory: 16Gi
+    min:
+      cpu: "100m"
+      memory: 128Mi
+    type: Container

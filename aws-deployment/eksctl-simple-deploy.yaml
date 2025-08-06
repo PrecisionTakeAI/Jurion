@@ -1,0 +1,35 @@
+# Simple EKS cluster configuration that will work
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: legalllm-working
+  region: ap-southeast-2
+  version: "1.30"  # Using stable version
+
+# This creates everything automatically - VPC, subnets, security groups, etc.
+managedNodeGroups:
+  - name: workers
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    # This is the key - managed node groups handle all the complexity
+    privateNetworking: false  # Use public networking for simplicity
+    volumeSize: 30
+    ssh:
+      allow: false  # No SSH needed
+    iam:
+      withAddonPolicies:
+        ebs: true
+        efs: true
+        cloudWatch: true
+
+# Enable required addons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest

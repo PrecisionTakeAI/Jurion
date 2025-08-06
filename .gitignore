@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+*.log
+test-results/
+coverage.xml
+
+# Infrastructure
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+terraform.tfvars
+
+# Project specific
+*.db
+*.sqlite
+*.sqlite3
+/data/
+/models/
+/outputs/
+/temp/
+/tmp/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Package files
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Backup files
+*.bak
+*.backup
+*~
+backup_*/

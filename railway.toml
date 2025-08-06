@@ -1,0 +1,61 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.railway-simple"
+
+[deploy]
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# Enterprise resource allocation
+[deploy.resources]
+memory = "4Gi"   # 4GB RAM for enterprise PostgreSQL deployment
+cpu = "4"        # 4 vCPU cores for enterprise features
+
+[env]
+# Enterprise LegalAI Hub Configuration
+PYTHONPATH = "/app"
+STREAMLIT_SERVER_HEADLESS = "true"
+STREAMLIT_SERVER_ADDRESS = "0.0.0.0"
+
+# Enterprise Mode Configuration
+USE_DATABASE = "true"
+ENTERPRISE_MODE = "true"
+MULTI_TENANT = "true"
+APP_NAME = "LegalAI Hub Enterprise"
+ENVIRONMENT = "production"
+DEBUG = "false"
+LOG_LEVEL = "INFO"
+
+# Australian Legal Configuration
+DEFAULT_JURISDICTION = "australia"
+LEGAL_DISCLAIMER_ENABLED = "true"
+AUDIT_LOGGING_ENABLED = "true"
+PRIVILEGE_PROTECTION_ENABLED = "true"
+SUPPORTED_JURISDICTIONS = "NSW,VIC,QLD,WA,SA,TAS,ACT,NT"
+PRIMARY_PRACTICE_AREAS = "family_law,property_law,divorce,child_custody"
+
+# Security Configuration
+SESSION_TIMEOUT_HOURS = "8"
+MAX_FAILED_ATTEMPTS = "5"
+LOCKOUT_DURATION_MINUTES = "30"
+MAX_FILE_SIZE_MB = "50"
+ALLOWED_FILE_TYPES = "pdf,docx,txt,jpg,jpeg,png"
+
+# Performance Configuration
+DB_POOL_SIZE = "10"
+DB_MAX_OVERFLOW = "20"
+DB_POOL_TIMEOUT = "30"
+CACHE_DEFAULT_TTL = "3600"
+CACHE_AI_RESPONSE_TTL = "7200"
+
+# Disable telemetry for privacy
+STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
+
+# Timezone and Localization
+TZ = "Australia/Sydney"
+BUSINESS_HOURS_START = "09:00"
+BUSINESS_HOURS_END = "17:00"
+BUSINESS_DAYS = "MON,TUE,WED,THU,FRI"
+

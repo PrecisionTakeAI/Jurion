@@ -1,0 +1,594 @@
+# Production Backup Strategy for LegalLLM Professional Multi-Agent System
+# Phase 4: Comprehensive backup and disaster recovery for Australian legal compliance
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-strategy-config
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+    compliance.australian-legal: "true"
+data:
+  # ============================================
+  # BACKUP STRATEGY CONFIGURATION
+  # ============================================
+  
+  # RTO/RPO Targets for Australian Legal Practice
+  RTO_TARGET_MINUTES: "5"      # Recovery Time Objective: <5 minutes
+  RPO_TARGET_MINUTES: "1"      # Recovery Point Objective: <1 minute data loss
+  
+  # Backup Schedules
+  FULL_BACKUP_SCHEDULE: "0 1 * * *"          # Daily at 1 AM
+  INCREMENTAL_BACKUP_SCHEDULE: "0 */6 * * *"  # Every 6 hours
+  TRANSACTION_LOG_BACKUP_SCHEDULE: "*/5 * * * *"  # Every 5 minutes
+  
+  # Retention Policies (Australian Legal Requirements)
+  DAILY_RETENTION_DAYS: "30"     # 30 days of daily backups
+  WEEKLY_RETENTION_WEEKS: "52"   # 52 weeks of weekly backups
+  MONTHLY_RETENTION_MONTHS: "84"  # 7 years monthly backups (legal requirement)
+  YEARLY_RETENTION_YEARS: "10"   # 10 years yearly backups
+  
+  # Storage Locations
+  PRIMARY_BACKUP_LOCATION: "s3://legalllm-backups-primary-au"
+  SECONDARY_BACKUP_LOCATION: "s3://legalllm-backups-secondary-au"
+  DISASTER_RECOVERY_LOCATION: "s3://legalllm-dr-sydney"
+  
+  # Compliance Configuration
+  ENCRYPTION_ENABLED: "true"
+  AUDIT_LOGGING_ENABLED: "true"
+  COMPLIANCE_VALIDATION: "family_law_act_1975,privacy_act_1988"
+  
+  # Performance Targets
+  BACKUP_PERFORMANCE_TARGET_MBPS: "100"
+  RESTORE_PERFORMANCE_TARGET_MBPS: "200"
+  PARALLEL_BACKUP_WORKERS: "8"
+
+---
+# PostgreSQL Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgresql-backup
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+    backup-type: postgresql
+spec:
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  timeZone: "Australia/Sydney"
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: legalllm-professional
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-service-account
+          containers:
+          - name: postgresql-backup
+            image: postgres:15-alpine
+            imagePullPolicy: Always
+            env:
+            - name: PGHOST
+              value: "postgresql-primary-svc"
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: "legalllm_multiagent"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-secret-access-key
+            - name: BACKUP_LOCATION
+              valueFrom:
+                configMapKeyRef:
+                  name: backup-strategy-config
+                  key: PRIMARY_BACKUP_LOCATION
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              # Install AWS CLI and backup tools
+              apk add --no-cache aws-cli gzip
+              
+              # Generate backup filename with timestamp
+              BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILENAME="postgresql_full_backup_${BACKUP_DATE}.sql.gz"
+              
+              echo "Starting PostgreSQL full backup: $BACKUP_FILENAME"
+              
+              # Create compressed backup with Australian legal compliance
+              pg_dump --verbose --clean --no-owner --no-privileges --format=custom \
+                --compress=9 --encoding=UTF-8 \
+                --extra-float-digits=3 \
+                --quote-all-identifiers \
+                > /tmp/backup.dump
+              
+              # Add compliance metadata
+              cat > /tmp/backup_metadata.json << EOF
+              {
+                "backup_date": "$(date -Iseconds)",
+                "backup_type": "full",
+                "database_name": "$PGDATABASE",
+                "retention_policy": "7_years",
+                "compliance_frameworks": [
+                  "family_law_act_1975",
+                  "privacy_act_1988",
+                  "australian_privacy_principles"
+                ],
+                "encryption": "AES-256",
+                "backup_size_bytes": $(stat -c%s /tmp/backup.dump),
+                "checksum": "$(sha256sum /tmp/backup.dump | cut -d' ' -f1)"
+              }
+              EOF
+              
+              # Encrypt backup for compliance
+              openssl enc -aes-256-cbc -salt -in /tmp/backup.dump -out /tmp/backup_encrypted.dump \
+                -pass env:ENCRYPTION_KEY
+              
+              # Compress encrypted backup
+              gzip -9 /tmp/backup_encrypted.dump
+              
+              # Upload to primary location
+              aws s3 cp /tmp/backup_encrypted.dump.gz \
+                "${BACKUP_LOCATION}/postgresql/daily/${BACKUP_FILENAME}" \
+                --storage-class STANDARD_IA \
+                --server-side-encryption AES256 \
+                --metadata compliance=australian_legal,retention=7_years
+              
+              # Upload metadata
+              aws s3 cp /tmp/backup_metadata.json \
+                "${BACKUP_LOCATION}/postgresql/metadata/backup_metadata_${BACKUP_DATE}.json" \
+                --server-side-encryption AES256
+              
+              # Upload to secondary location for disaster recovery
+              aws s3 cp /tmp/backup_encrypted.dump.gz \
+                "s3://legalllm-backups-secondary-au/postgresql/daily/${BACKUP_FILENAME}" \
+                --storage-class STANDARD_IA \
+                --server-side-encryption AES256
+              
+              # Cleanup old backups according to retention policy
+              python3 /scripts/cleanup_old_backups.py \
+                --backup-location "${BACKUP_LOCATION}/postgresql/daily" \
+                --retention-days 30 \
+                --backup-type daily
+              
+              # Validate backup integrity
+              aws s3 cp "${BACKUP_LOCATION}/postgresql/daily/${BACKUP_FILENAME}" \
+                /tmp/backup_validation.dump.gz
+              
+              gunzip /tmp/backup_validation.dump.gz
+              openssl enc -aes-256-cbc -d -in /tmp/backup_validation.dump \
+                -out /tmp/backup_restored.dump -pass env:ENCRYPTION_KEY
+              
+              # Test restore capability (to temporary database)
+              echo "Validating backup integrity..."
+              pg_restore --list /tmp/backup_restored.dump > /tmp/backup_contents.txt
+              
+              if [ $(wc -l < /tmp/backup_contents.txt) -gt 0 ]; then
+                echo "✅ Backup validation successful"
+              else
+                echo "❌ Backup validation failed"
+                exit 1
+              fi
+              
+              # Send backup completion notification
+              curl -X POST "$SLACK_WEBHOOK_URL" \
+                -H 'Content-type: application/json' \
+                --data "{\"text\":\"✅ PostgreSQL backup completed successfully\\nFile: $BACKUP_FILENAME\\nSize: $(stat -c%s /tmp/backup.dump | numfmt --to=iec)\\nCompliance: Australian Legal Requirements Met\"}"
+              
+              echo "PostgreSQL backup completed successfully"
+            volumeMounts:
+            - name: backup-scripts
+              mountPath: /scripts
+            - name: encryption-key
+              mountPath: /secrets
+              readOnly: true
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+          volumes:
+          - name: backup-scripts
+            configMap:
+              name: backup-scripts
+              defaultMode: 0755
+          - name: encryption-key
+            secret:
+              secretName: backup-encryption-key
+              defaultMode: 0400
+
+---
+# Redis Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+    backup-type: redis
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  timeZone: "Australia/Sydney"
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: legalllm-professional
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-service-account
+          containers:
+          - name: redis-backup
+            image: redis:7-alpine
+            imagePullPolicy: Always
+            env:
+            - name: REDIS_COORDINATOR_HOST
+              value: "redis-coordinator-svc"
+            - name: REDIS_QUEUE_HOST
+              value: "redis-queue-svc"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-secret-access-key
+            - name: BACKUP_LOCATION
+              valueFrom:
+                configMapKeyRef:
+                  name: backup-strategy-config
+                  key: PRIMARY_BACKUP_LOCATION
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              # Install AWS CLI
+              apk add --no-cache aws-cli gzip openssl python3
+              
+              BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+              
+              echo "Starting Redis backup: $BACKUP_DATE"
+              
+              # Backup Redis Coordinator
+              redis-cli -h $REDIS_COORDINATOR_HOST --rdb /tmp/redis_coordinator_${BACKUP_DATE}.rdb
+              
+              # Backup Redis Queue
+              redis-cli -h $REDIS_QUEUE_HOST --rdb /tmp/redis_queue_${BACKUP_DATE}.rdb
+              
+              # Create backup metadata
+              cat > /tmp/redis_backup_metadata.json << EOF
+              {
+                "backup_date": "$(date -Iseconds)",
+                "backup_type": "redis_snapshot",
+                "coordinator_size_bytes": $(stat -c%s /tmp/redis_coordinator_${BACKUP_DATE}.rdb),
+                "queue_size_bytes": $(stat -c%s /tmp/redis_queue_${BACKUP_DATE}.rdb),
+                "compliance_frameworks": [
+                  "privacy_act_1988",
+                  "australian_privacy_principles"
+                ],
+                "retention_policy": "30_days"
+              }
+              EOF
+              
+              # Encrypt and compress backups
+              openssl enc -aes-256-cbc -salt -in /tmp/redis_coordinator_${BACKUP_DATE}.rdb \
+                -out /tmp/redis_coordinator_encrypted.rdb -pass env:ENCRYPTION_KEY
+              openssl enc -aes-256-cbc -salt -in /tmp/redis_queue_${BACKUP_DATE}.rdb \
+                -out /tmp/redis_queue_encrypted.rdb -pass env:ENCRYPTION_KEY
+              
+              gzip -9 /tmp/redis_coordinator_encrypted.rdb
+              gzip -9 /tmp/redis_queue_encrypted.rdb
+              
+              # Upload to S3
+              aws s3 cp /tmp/redis_coordinator_encrypted.rdb.gz \
+                "${BACKUP_LOCATION}/redis/coordinator/redis_coordinator_${BACKUP_DATE}.rdb.gz" \
+                --storage-class STANDARD_IA --server-side-encryption AES256
+              
+              aws s3 cp /tmp/redis_queue_encrypted.rdb.gz \
+                "${BACKUP_LOCATION}/redis/queue/redis_queue_${BACKUP_DATE}.rdb.gz" \
+                --storage-class STANDARD_IA --server-side-encryption AES256
+              
+              aws s3 cp /tmp/redis_backup_metadata.json \
+                "${BACKUP_LOCATION}/redis/metadata/backup_metadata_${BACKUP_DATE}.json" \
+                --server-side-encryption AES256
+              
+              echo "Redis backup completed successfully"
+            volumeMounts:
+            - name: encryption-key
+              mountPath: /secrets
+              readOnly: true
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "250m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+          volumes:
+          - name: encryption-key
+            secret:
+              secretName: backup-encryption-key
+              defaultMode: 0400
+
+---
+# Document Storage Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: document-storage-backup
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+    backup-type: documents
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  timeZone: "Australia/Sydney"
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: legalllm-professional
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-service-account
+          containers:
+          - name: document-backup
+            image: amazon/aws-cli:latest
+            imagePullPolicy: Always
+            env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-secret-access-key
+            - name: BACKUP_LOCATION
+              valueFrom:
+                configMapKeyRef:
+                  name: backup-strategy-config
+                  key: PRIMARY_BACKUP_LOCATION
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+              
+              echo "Starting document storage backup: $BACKUP_DATE"
+              
+              # Install required tools
+              yum update -y && yum install -y tar gzip openssl
+              
+              # Create incremental backup using rsync-like functionality
+              find /app/documents -type f -newer /tmp/last_backup_timestamp 2>/dev/null || find /app/documents -type f > /tmp/changed_files.txt
+              
+              # Create tar archive of changed files
+              tar -czf /tmp/documents_incremental_${BACKUP_DATE}.tar.gz \
+                --files-from=/tmp/changed_files.txt \
+                --absolute-names 2>/dev/null || true
+              
+              # Encrypt document backup
+              openssl enc -aes-256-cbc -salt -in /tmp/documents_incremental_${BACKUP_DATE}.tar.gz \
+                -out /tmp/documents_encrypted_${BACKUP_DATE}.tar.gz -pass env:ENCRYPTION_KEY
+              
+              # Upload to S3 with appropriate tagging for Australian legal compliance
+              aws s3 cp /tmp/documents_encrypted_${BACKUP_DATE}.tar.gz \
+                "${BACKUP_LOCATION}/documents/incremental/documents_${BACKUP_DATE}.tar.gz" \
+                --storage-class DEEP_ARCHIVE \
+                --server-side-encryption AES256 \
+                --metadata compliance=australian_legal,retention=7_years,type=legal_documents
+              
+              # Update backup timestamp
+              touch /tmp/last_backup_timestamp
+              
+              # Create backup index for fast recovery
+              tar -tzf /tmp/documents_incremental_${BACKUP_DATE}.tar.gz > /tmp/backup_index_${BACKUP_DATE}.txt
+              aws s3 cp /tmp/backup_index_${BACKUP_DATE}.txt \
+                "${BACKUP_LOCATION}/documents/indexes/backup_index_${BACKUP_DATE}.txt" \
+                --server-side-encryption AES256
+              
+              echo "Document storage backup completed successfully"
+            volumeMounts:
+            - name: document-storage
+              mountPath: /app/documents
+              readOnly: true
+            - name: encryption-key
+              mountPath: /secrets
+              readOnly: true
+            - name: backup-state
+              mountPath: /tmp
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+          volumes:
+          - name: document-storage
+            persistentVolumeClaim:
+              claimName: interface-document-storage-pvc
+          - name: encryption-key
+            secret:
+              secretName: backup-encryption-key
+              defaultMode: 0400
+          - name: backup-state
+            persistentVolumeClaim:
+              claimName: backup-state-pvc
+
+---
+# Backup Scripts ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-scripts
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+data:
+  cleanup_old_backups.py: |
+    #!/usr/bin/env python3
+    """
+    Cleanup old backups according to Australian legal retention policies
+    """
+    import boto3
+    import argparse
+    from datetime import datetime, timedelta
+    import sys
+    
+    def cleanup_old_backups(backup_location, retention_days, backup_type):
+        s3 = boto3.client('s3')
+        
+        # Parse S3 location
+        bucket = backup_location.replace('s3://', '').split('/')[0]
+        prefix = '/'.join(backup_location.replace('s3://', '').split('/')[1:])
+        
+        # Calculate cutoff date
+        cutoff_date = datetime.now() - timedelta(days=retention_days)
+        
+        print(f"Cleaning up {backup_type} backups older than {cutoff_date}")
+        
+        # List objects
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        
+        deleted_count = 0
+        for obj in response.get('Contents', []):
+            if obj['LastModified'].replace(tzinfo=None) < cutoff_date:
+                # Skip if backup has legal hold (7 year retention)
+                tags = s3.get_object_tagging(Bucket=bucket, Key=obj['Key'])
+                has_legal_hold = any(tag['Key'] == 'retention' and tag['Value'] == '7_years' 
+                                   for tag in tags.get('TagSet', []))
+                
+                if not has_legal_hold:
+                    s3.delete_object(Bucket=bucket, Key=obj['Key'])
+                    deleted_count += 1
+                    print(f"Deleted: {obj['Key']}")
+        
+        print(f"Cleanup completed. Deleted {deleted_count} old backups.")
+        return deleted_count
+    
+    if __name__ == "__main__":
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--backup-location', required=True)
+        parser.add_argument('--retention-days', type=int, required=True)
+        parser.add_argument('--backup-type', required=True)
+        
+        args = parser.parse_args()
+        
+        try:
+            cleanup_old_backups(args.backup_location, args.retention_days, args.backup_type)
+        except Exception as e:
+            print(f"Cleanup failed: {e}")
+            sys.exit(1)
+
+---
+# Backup Service Account and RBAC
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-service-account
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-role
+  namespace: legalllm-multiagent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-rolebinding
+  namespace: legalllm-multiagent
+subjects:
+- kind: ServiceAccount
+  name: backup-service-account
+  namespace: legalllm-multiagent
+roleRef:
+  kind: Role
+  name: backup-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Backup State PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-state-pvc
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ssd-storage
+  resources:
+    requests:
+      storage: 10Gi

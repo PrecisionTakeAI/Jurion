@@ -1,0 +1,431 @@
+# Disaster Recovery Procedure for LegalLLM Professional Multi-Agent System
+# Phase 4: Comprehensive disaster recovery with <5 minute RTO and <1 minute RPO
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: disaster-recovery-procedure
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: disaster-recovery
+    compliance.australian-legal: "true"
+data:
+  disaster-recovery-plan.md: |
+    # LegalLLM Professional Disaster Recovery Plan
+    
+    ## Overview
+    This document outlines the disaster recovery procedures for the LegalLLM Professional 
+    Multi-Agent System, designed to meet Australian legal practice continuity requirements.
+    
+    ## Recovery Objectives
+    - **RTO (Recovery Time Objective)**: 5 minutes
+    - **RPO (Recovery Point Objective)**: 1 minute
+    - **Availability Target**: 99.9% uptime
+    - **Data Integrity**: Zero data loss for legal documents
+    
+    ## Disaster Scenarios
+    
+    ### Scenario 1: Single Pod Failure
+    **Detection**: Kubernetes liveness probe failure
+    **Impact**: Minimal - auto-recovery via ReplicaSet
+    **Action**: Automatic - no manual intervention required
+    
+    ### Scenario 2: Node Failure
+    **Detection**: Node NotReady status
+    **Impact**: Temporary service degradation
+    **Action**: Kubernetes reschedules pods to healthy nodes
+    **Timeline**: 2-3 minutes
+    
+    ### Scenario 3: Database Failure
+    **Detection**: PostgreSQL health check failure
+    **Impact**: Complete service outage
+    **Action**: Activate database standby or restore from backup
+    **Timeline**: 3-5 minutes
+    
+    ### Scenario 4: Complete Cluster Failure
+    **Detection**: All cluster nodes unreachable
+    **Impact**: Complete system outage
+    **Action**: Activate DR cluster and restore from backups
+    **Timeline**: 5-10 minutes
+    
+    ### Scenario 5: Data Center Outage
+    **Detection**: Regional AWS outage
+    **Impact**: Complete regional failure
+    **Action**: Failover to secondary region
+    **Timeline**: 10-15 minutes
+    
+    ## Recovery Procedures
+    
+    ### Automatic Recovery (Scenarios 1-2)
+    1. Kubernetes detects pod/node failure
+    2. Scheduler creates replacement pods on healthy nodes
+    3. Load balancer routes traffic to healthy instances
+    4. Monitoring systems track recovery progress
+    
+    ### Database Recovery (Scenario 3)
+    ```bash
+    # 1. Activate standby database
+    kubectl patch postgresql postgresql-cluster \
+      --type='merge' \
+      -p='{"spec":{"switchover":{"targetPrimary":"postgresql-standby"}}}'
+    
+    # 2. If standby unavailable, restore from backup
+    kubectl create job postgresql-restore-$(date +%s) \
+      --from=cronjob/postgresql-backup-restore
+    
+    # 3. Verify data integrity
+    kubectl exec -it postgresql-primary-0 -- \
+      psql -c "SELECT COUNT(*) FROM cases;" legalllm_multiagent
+    ```
+    
+    ### Cluster Recovery (Scenario 4)
+    ```bash
+    # 1. Deploy to DR cluster
+    kubectl config use-context dr-cluster-sydney
+    
+    # 2. Restore persistent volumes from snapshots
+    kubectl apply -f infrastructure/disaster-recovery/volume-snapshots.yaml
+    
+    # 3. Deploy applications
+    kubectl apply -f kubernetes/
+    
+    # 4. Restore database
+    kubectl create job postgresql-dr-restore-$(date +%s) \
+      --from=cronjob/postgresql-disaster-restore
+    
+    # 5. Update DNS to point to DR cluster
+    aws route53 change-resource-record-sets \
+      --hosted-zone-id Z123456789 \
+      --change-batch file://dns-failover.json
+    ```
+    
+    ### Regional Failover (Scenario 5)
+    ```bash
+    # 1. Activate Sydney DR region
+    export AWS_REGION=ap-southeast-2
+    kubectl config use-context sydney-dr-cluster
+    
+    # 2. Deploy full stack to DR region
+    ./scripts/dr-deploy.sh --region sydney --priority emergency
+    
+    # 3. Restore from cross-region backups
+    ./scripts/restore-from-cross-region-backup.sh \
+      --source-region ap-southeast-4 \
+      --target-region ap-southeast-2
+    
+    # 4. Update global DNS for failover
+    ./scripts/dns-failover.sh --target-region sydney
+    ```
+    
+    ## Validation Procedures
+    
+    ### Post-Recovery Validation
+    ```bash
+    # 1. System health check
+    python scripts/post-recovery-validation.py
+    
+    # 2. A2A Protocol latency validation
+    python scripts/validate_a2a_latency.py --target-ms 50
+    
+    # 3. Document processing validation
+    python scripts/validate_document_processing.py \
+      --target-docs 500 --target-time 90
+    
+    # 4. Australian legal compliance check
+    python scripts/validate_australian_compliance.py
+    
+    # 5. End-to-end workflow test
+    pytest tests/e2e/test_complete_user_workflows.py -v
+    ```
+    
+    ## Contact Information
+    
+    ### Emergency Contacts
+    - **Primary On-Call**: +61 4XX XXX XXX
+    - **Secondary On-Call**: +61 4XX XXX XXX
+    - **Legal Compliance Officer**: +61 4XX XXX XXX
+    - **AWS Support**: Enterprise Support Case
+    
+    ### Escalation Matrix
+    1. **Level 1**: DevOps Engineer (0-15 minutes)
+    2. **Level 2**: Senior DevOps Engineer (15-30 minutes)
+    3. **Level 3**: Technical Lead (30-60 minutes)
+    4. **Level 4**: Legal Technology Director (60+ minutes)
+    
+    ## Communication Plan
+    
+    ### Internal Communication
+    - **Slack Channel**: #legalllm-incidents
+    - **Email List**: legalllm-incidents@company.com
+    - **Status Page**: https://status.legalllm.com
+    
+    ### Client Communication
+    - **Automated**: Status page updates
+    - **Manual**: Email to all active users
+    - **Legal Notice**: For prolonged outages affecting legal deadlines
+
+---
+# Disaster Recovery Job Templates
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgresql-disaster-restore-template
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: disaster-recovery
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: legalllm-professional
+        app.kubernetes.io/component: disaster-recovery
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: disaster-recovery-sa
+      containers:
+      - name: postgresql-restore
+        image: postgres:15-alpine
+        env:
+        - name: PGHOST
+          value: "postgresql-primary-svc"
+        - name: PGPORT
+          value: "5432"
+        - name: PGDATABASE
+          value: "legalllm_multiagent"
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: username
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: password
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: backup-credentials
+              key: aws-access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: backup-credentials
+              key: aws-secret-access-key
+        - name: DISASTER_RECOVERY_LOCATION
+          value: "s3://legalllm-dr-sydney"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          
+          echo "🚨 DISASTER RECOVERY: Starting PostgreSQL restore"
+          
+          # Install required tools
+          apk add --no-cache aws-cli openssl
+          
+          # Find latest backup
+          LATEST_BACKUP=$(aws s3 ls ${DISASTER_RECOVERY_LOCATION}/postgresql/daily/ \
+            --recursive | sort | tail -n 1 | awk '{print $4}')
+          
+          echo "Restoring from backup: $LATEST_BACKUP"
+          
+          # Download and decrypt backup
+          aws s3 cp "s3://legalllm-dr-sydney/$LATEST_BACKUP" /tmp/backup_encrypted.dump.gz
+          gunzip /tmp/backup_encrypted.dump.gz
+          openssl enc -aes-256-cbc -d -in /tmp/backup_encrypted.dump \
+            -out /tmp/backup_decrypted.dump -pass env:ENCRYPTION_KEY
+          
+          # Drop existing database and recreate
+          psql -h $PGHOST -U $PGUSER -c "DROP DATABASE IF EXISTS ${PGDATABASE}_old;"
+          psql -h $PGHOST -U $PGUSER -c "ALTER DATABASE $PGDATABASE RENAME TO ${PGDATABASE}_old;"
+          psql -h $PGHOST -U $PGUSER -c "CREATE DATABASE $PGDATABASE;"
+          
+          # Restore database
+          pg_restore --verbose --clean --no-owner --no-privileges \
+            --host=$PGHOST --username=$PGUSER --dbname=$PGDATABASE \
+            /tmp/backup_decrypted.dump
+          
+          # Verify restore
+          CASE_COUNT=$(psql -h $PGHOST -U $PGUSER -d $PGDATABASE \
+            -t -c "SELECT COUNT(*) FROM cases;" | tr -d ' ')
+          
+          echo "✅ Restore completed. Cases in database: $CASE_COUNT"
+          
+          # Notify disaster recovery completion
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            --data "{\"text\":\"🚨 DISASTER RECOVERY COMPLETED\\n✅ PostgreSQL restore successful\\n📊 Cases restored: $CASE_COUNT\\n⏱️ RTO Target: <5 minutes\\n🇦🇺 Australian Legal Compliance: Maintained\"}"
+          
+          echo "🚨 DISASTER RECOVERY: PostgreSQL restore completed successfully"
+        volumeMounts:
+        - name: encryption-key
+          mountPath: /secrets
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      volumes:
+      - name: encryption-key
+        secret:
+          secretName: backup-encryption-key
+          defaultMode: 0400
+
+---
+# Disaster Recovery Monitoring
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: disaster-recovery-validation
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: disaster-recovery
+spec:
+  schedule: "0 6 * * 1"  # Weekly on Monday at 6 AM
+  timeZone: "Australia/Sydney"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: legalllm-professional
+            app.kubernetes.io/component: disaster-recovery
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: disaster-recovery-sa
+          containers:
+          - name: dr-validation
+            image: legalllm-dr-validator:latest
+            env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backup-credentials
+                  key: aws-secret-access-key
+            - name: DR_CLUSTER_ENDPOINT
+              value: "https://dr-cluster-sydney.k8s.local"
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              echo "🔍 DISASTER RECOVERY: Weekly validation starting"
+              
+              # 1. Validate backup integrity
+              python scripts/validate_backup_integrity.py \
+                --location s3://legalllm-backups-primary-au \
+                --compliance australian_legal
+              
+              # 2. Test DR cluster accessibility
+              kubectl --kubeconfig=/secrets/dr-kubeconfig get nodes
+              
+              # 3. Validate cross-region backup replication
+              python scripts/validate_cross_region_backups.py \
+                --primary ap-southeast-4 \
+                --secondary ap-southeast-2
+              
+              # 4. Test DNS failover configuration
+              python scripts/validate_dns_failover.py \
+                --domain legalllm.com.au
+              
+              # 5. Validate RTO/RPO compliance
+              python scripts/validate_rto_rpo.py \
+                --rto-target 300 \
+                --rpo-target 60
+              
+              # 6. Australian legal compliance check
+              python scripts/validate_australian_legal_dr.py
+              
+              # Generate DR readiness report
+              python scripts/generate_dr_report.py \
+                --output /tmp/dr_readiness_report.json
+              
+              # Upload report
+              aws s3 cp /tmp/dr_readiness_report.json \
+                s3://legalllm-compliance-reports/dr/dr_readiness_$(date +%Y%m%d).json \
+                --server-side-encryption AES256
+              
+              echo "✅ DISASTER RECOVERY: Weekly validation completed"
+              
+              # Send validation report
+              curl -X POST "$SLACK_WEBHOOK_URL" \
+                -H 'Content-type: application/json' \
+                --data "{\"text\":\"📊 Weekly DR Validation Completed\\n✅ Backup Integrity: Validated\\n✅ DR Cluster: Ready\\n✅ Cross-Region Replication: Active\\n✅ RTO/RPO Targets: Met\\n🇦🇺 Australian Legal Compliance: Verified\"}"
+            volumeMounts:
+            - name: dr-kubeconfig
+              mountPath: /secrets
+              readOnly: true
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "250m"
+              limits:
+                memory: "1Gi"
+                cpu: "500m"
+          volumes:
+          - name: dr-kubeconfig
+            secret:
+              secretName: dr-cluster-kubeconfig
+              defaultMode: 0400
+
+---
+# Disaster Recovery Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: disaster-recovery-sa
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: disaster-recovery
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: disaster-recovery-role
+  namespace: legalllm-multiagent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "persistentvolumeclaims", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["postgresql.cnpg.io"]
+  resources: ["clusters", "backups"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: disaster-recovery-rolebinding
+  namespace: legalllm-multiagent
+subjects:
+- kind: ServiceAccount
+  name: disaster-recovery-sa
+  namespace: legalllm-multiagent
+roleRef:
+  kind: Role
+  name: disaster-recovery-role
+  apiGroup: rbac.authorization.k8s.io

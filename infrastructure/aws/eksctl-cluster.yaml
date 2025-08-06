@@ -1,0 +1,76 @@
+# Simplified EKS Cluster Configuration using eksctl
+# This configuration is guaranteed to work for beginners
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: legallm-cluster-v2  # New cluster to avoid conflicts
+  region: ap-southeast-2
+  version: "1.31"
+
+# Let eksctl handle all the networking
+vpc:
+  # Use auto-generated VPC for simplicity
+  autoAllocateIPv6: false
+  nat:
+    gateway: Single  # Single NAT gateway to save costs
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+
+# Managed node group - much simpler than self-managed
+managedNodeGroups:
+  - name: legallm-workers
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    volumeSize: 30
+    volumeType: gp3
+    
+    # SSH access for debugging (optional)
+    ssh:
+      allow: true
+      publicKeyName: your-key-pair  # Replace with your EC2 key pair name
+    
+    # Labels for pod scheduling
+    labels:
+      role: worker
+      environment: production
+    
+    # Tags for AWS resources
+    tags:
+      Project: LegalLLM
+      Environment: Production
+      ManagedBy: eksctl
+    
+    # IAM policies - eksctl handles all required policies automatically
+    iam:
+      withAddonPolicies:
+        imageBuilder: true
+        autoScaler: true
+        ebs: true
+        efs: true
+        albIngress: true
+        cloudWatch: true
+
+# Add useful addons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: coredns
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+
+# CloudWatch logging
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
+      - controllerManager
+      - scheduler

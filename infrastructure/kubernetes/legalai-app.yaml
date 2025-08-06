@@ -1,0 +1,275 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalai-app
+  namespace: legalai-hub
+  labels:
+    app: legalai-app
+    component: application
+    version: v1.0.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: legalai-app
+  template:
+    metadata:
+      labels:
+        app: legalai-app
+        component: application
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8501"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: legalai-app
+        image: legalai-hub:latest
+        ports:
+        - containerPort: 8501
+          name: http
+          protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "Legal LLM Enhanced"
+        - name: DEBUG
+          value: "False"
+        - name: MAX_FILE_SIZE_MB
+          value: "50"
+        - name: DEFAULT_JURISDICTION
+          value: "united_states"
+        - name: DEFAULT_MODEL
+          value: "gpt-4"
+        - name: TEMPERATURE
+          value: "0.1"
+        - name: MAX_TOKENS
+          value: "4000"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: legalai-secrets
+              key: database-url
+        - name: DB_HOST
+          value: "postgresql-primary-svc"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "legalai"
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgresql-secret
+              key: password
+        - name: USE_DATABASE
+          value: "true"
+        - name: SESSION_TIMEOUT_HOURS
+          value: "8"
+        - name: MAX_FAILED_ATTEMPTS
+          value: "5"
+        - name: LOCKOUT_DURATION_MINUTES
+          value: "30"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalai-secrets
+              key: openai-api-key
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalai-secrets
+              key: groq-api-key
+        - name: REDIS_URL
+          value: "redis://redis-svc:6379"
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/data
+        - name: compliance-logs
+          mountPath: /app/logs/compliance
+        - name: temp-storage
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      - name: compliance-sidecar
+        image: legalai-compliance:latest
+        ports:
+        - containerPort: 9090
+          name: compliance
+        env:
+        - name: COMPLIANCE_MODE
+          value: "iso27001"
+        - name: AUDIT_LOG_LEVEL
+          value: "info"
+        - name: AUSTRALIAN_COMPLIANCE
+          value: "true"
+        volumeMounts:
+        - name: compliance-logs
+          mountPath: /var/log/compliance
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: app-data
+        persistentVolumeClaim:
+          claimName: legalai-app-data
+      - name: compliance-logs
+        persistentVolumeClaim:
+          claimName: legalai-compliance-logs
+      - name: temp-storage
+        emptyDir:
+          sizeLimit: 1Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - legalai-app
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: legalai-app-svc
+  namespace: legalai-hub
+  labels:
+    app: legalai-app
+    component: application
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8501
+    targetPort: 8501
+    name: http
+  - port: 9090
+    targetPort: 9090
+    name: compliance
+  selector:
+    app: legalai-app
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legalai-app-data
+  namespace: legalai-hub
+  labels:
+    app: legalai-app
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-storage
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legalai-compliance-logs
+  namespace: legalai-hub
+  labels:
+    app: legalai-app
+    component: compliance
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-storage
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: legalai-app-hpa
+  namespace: legalai-hub
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: legalai-app
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60

@@ -1,0 +1,84 @@
+name: 'Notify Beta Users'
+description: 'Send notifications to beta users about new deployments'
+inputs:
+  webhook_url:
+    description: 'Slack webhook URL'
+    required: true
+  environment:
+    description: 'Deployment environment'
+    required: true
+    default: 'staging'
+  features:
+    description: 'New features description'
+    required: false
+    default: 'Latest updates and improvements'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send notification
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook_url }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        FEATURES: ${{ inputs.features }}
+      run: |
+        cat > notification.json << EOF
+        {
+          "text": "🧪 Beta Testing Update - $ENVIRONMENT",
+          "blocks": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": "LegalAI Hub Beta Testing"
+              }
+            },
+            {
+              "type": "section",
+              "fields": [
+                {
+                  "type": "mrkdwn",
+                  "text": "*Environment:*\n$ENVIRONMENT"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*SHA:*\n${{ github.sha }}"
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*What's New:*\n$FEATURES"
+              }
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Test Now"
+                  },
+                  "url": "${{ secrets.STAGING_URL }}"
+                },
+                {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Report Issues"
+                  },
+                  "url": "https://github.com/${{ github.repository }}/issues/new?template=beta-feedback.md"
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        
+        curl -X POST $WEBHOOK_URL \
+          -H 'Content-type: application/json' \
+          --data @notification.json

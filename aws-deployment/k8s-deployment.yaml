@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalllm-app
+  namespace: legalllm
+  labels:
+    app: legalllm
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legalllm
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: legalllm
+        tier: frontend
+    spec:
+      containers:
+      - name: legalllm-app
+        image: 535319026444.dkr.ecr.ap-southeast-2.amazonaws.com/legalllm-app:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8501
+          name: streamlit
+        env:
+        # Streamlit specific
+        - name: STREAMLIT_SERVER_PORT
+          value: "8501"
+        - name: STREAMLIT_SERVER_ADDRESS
+          value: "0.0.0.0"
+        - name: STREAMLIT_SERVER_ENABLE_CORS
+          value: "false"
+        # Load all config from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        - secretRef:
+            name: legalllm-secrets
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: data-volume
+          mountPath: /app/data
+        - name: uploads-volume
+          mountPath: /app/uploads
+      volumes:
+      - name: data-volume
+        emptyDir: {}
+      - name: uploads-volume
+        emptyDir: {}
+      # Optional: Add init container to check database connectivity
+      initContainers:
+      - name: check-db
+        image: postgres:15-alpine
+        command: 
+        - sh
+        - -c
+        - |
+          until pg_isready -h $DB_HOST -p $DB_PORT -U $DB_USER; do
+            echo "Waiting for database..."
+            sleep 2
+          done
+          echo "Database is ready!"
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        - secretRef:
+            name: legalllm-secrets

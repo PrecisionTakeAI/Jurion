@@ -1,0 +1,308 @@
+name: LegalAI Hub CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_legalai
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-enterprise.txt
+        pip install pytest pytest-cov pytest-asyncio
+
+    - name: Run linting
+      run: |
+        pip install black isort flake8
+        black --check .
+        isort --check-only .
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+    - name: Run unit tests
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_legalai
+        REDIS_URL: redis://localhost:6379
+        USE_DATABASE: true
+      run: |
+        python -m pytest test_critical_fixes.py -v --cov=core --cov-report=xml
+        python -m pytest test_document_analysis.py -v
+        python simple_pdf_test.py
+
+    - name: Run integration tests
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_legalai
+        REDIS_URL: redis://localhost:6379
+        USE_DATABASE: true
+      run: |
+        python test_complete_solution.py
+        python demo_authentication.py
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run security scan
+      uses: pypa/gh-action-pip-audit@v1.0.8
+      with:
+        inputs: requirements.txt requirements-enterprise.txt
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  build-and-push:
+    needs: [test, security-scan]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: deployment/Dockerfile.enterprise
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Railway Staging
+      env:
+        RAILWAY_TOKEN: ${{ secrets.RAILWAY_STAGING_TOKEN }}
+      run: |
+        npm install -g @railway/cli
+        railway login --token $RAILWAY_TOKEN
+        railway up --service legalai-hub-staging
+
+    - name: Run smoke tests
+      env:
+        STAGING_URL: ${{ secrets.STAGING_URL }}
+      run: |
+        sleep 60  # Wait for deployment
+        curl -f $STAGING_URL/_stcore/health
+        python tests/smoke_tests.py --url $STAGING_URL
+
+    - name: Notify beta users
+      if: success()
+      uses: ./.github/actions/notify-beta-users
+      with:
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        environment: staging
+
+  deploy-production:
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Railway Production
+      env:
+        RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+      run: |
+        npm install -g @railway/cli
+        railway login --token $RAILWAY_TOKEN
+        railway up --service legalai-hub-production
+
+    - name: Run production health checks
+      env:
+        PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+      run: |
+        sleep 90  # Wait for deployment
+        curl -f $PRODUCTION_URL/_stcore/health
+        python tests/production_health_check.py --url $PRODUCTION_URL
+
+    - name: Update monitoring dashboards
+      run: |
+        curl -X POST "${{ secrets.GRAFANA_API_URL }}/api/annotations" \
+          -H "Authorization: Bearer ${{ secrets.GRAFANA_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "text": "Production deployment - ${{ github.sha }}",
+            "tags": ["deployment", "production"],
+            "time": '$(date +%s000)'
+          }'
+
+    - name: Notify stakeholders
+      if: success()
+      uses: ./.github/actions/notify-deployment
+      with:
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        environment: production
+        version: ${{ github.sha }}
+
+  beta-feedback-collection:
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create beta feedback issue
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const { data: issue } = await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Beta Feedback Collection - Staging Deploy ${context.sha.substring(0, 7)}`,
+            body: `
+              ## 🧪 Beta Testing Available
+
+              **Staging URL:** ${{ secrets.STAGING_URL }}
+              **Deploy SHA:** ${context.sha}
+              **Features:** 
+              - Enhanced case management
+              - Improved AI document processing
+              - Updated authentication flow
+
+              ### Testing Checklist
+              - [ ] User registration and login
+              - [ ] Case creation workflow
+              - [ ] Document upload and processing
+              - [ ] AI query functionality
+              - [ ] Multi-tenant data isolation
+
+              ### Feedback Form
+              Please provide feedback on:
+              1. **Usability:** Rate 1-10
+              2. **Performance:** Any slowdowns?
+              3. **Bugs:** Report any issues
+              4. **Features:** What's missing?
+
+              **Beta Users:** @beta-testers
+              **Due Date:** ${new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}
+            `,
+            labels: ['beta-testing', 'feedback-collection'],
+            assignees: ['product-manager']
+          });
+
+    - name: Send beta notification
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        curl -X POST $SLACK_WEBHOOK \
+          -H 'Content-type: application/json' \
+          --data '{
+            "text": "🧪 New beta version available for testing!",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*LegalAI Hub Beta Testing*\n\n:rocket: New staging deployment ready!\n:link: <${{ secrets.STAGING_URL }}|Test Environment>\n:github: <https://github.com/${{ github.repository }}/issues|Feedback Issues>"
+                }
+              }
+            ]
+          }'

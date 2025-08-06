@@ -1,0 +1,34 @@
+# Minimal EKS test configuration - Single node for testing
+# Use this to verify your AWS setup works before scaling up
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: legallm-test
+  region: ap-southeast-2
+  version: "1.31"
+
+# Minimal node group for testing
+managedNodeGroups:
+  - name: test-node
+    instanceType: t3.small  # Smallest instance for testing
+    desiredCapacity: 1      # Just one node
+    minSize: 1
+    maxSize: 1
+    volumeSize: 20
+    volumeType: gp3
+    
+    # Essential IAM policies only
+    iam:
+      withAddonPolicies:
+        ebs: true
+        cloudWatch: true
+
+# Minimal addons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: coredns
+    version: latest

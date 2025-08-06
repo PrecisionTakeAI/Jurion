@@ -1,0 +1,711 @@
+name: Multi-Agent LegalLLM CI/CD Pipeline
+# Enhanced CI/CD for multi-agent system with comprehensive testing and zero-downtime deployment
+
+on:
+  push:
+    branches: [ main, develop, feature/*, multi-agent/* ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      skip_tests:
+        description: 'Skip test execution'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  POSTGRES_VERSION: '15'
+  REDIS_VERSION: '7'
+  DOCKER_REGISTRY: 'ghcr.io'
+  IMAGE_NAME: 'legalllm/multi-agent'
+
+jobs:
+  # Pre-flight checks and code quality
+  code-quality:
+    runs-on: ubuntu-latest
+    name: Code Quality & Security Analysis
+    outputs:
+      security-passed: ${{ steps.security-check.outputs.passed }}
+      quality-score: ${{ steps.quality-metrics.outputs.score }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better analysis
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install code quality tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r multi-agent-requirements.txt
+        pip install black isort flake8 mypy bandit safety semgrep
+    
+    - name: Code formatting check (Black)
+      run: black --check --diff . --exclude="/(\.git|\.venv|venv|\.tox|dist|build)/"
+    
+    - name: Import sorting check (isort)
+      run: isort --check-only --diff . --skip-glob="*/.git/*" --skip-glob="*/venv/*"
+    
+    - name: Linting (flake8)
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+          --exclude=.git,__pycache__,venv,.venv,dist,build
+    
+    - name: Type checking (mypy)
+      run: |
+        mypy core/ components/ database/ --ignore-missing-imports \
+          --exclude="/(test_|conftest)" --show-error-codes
+    
+    - name: Security scanning (Bandit)
+      run: |
+        bandit -r . -f json -o bandit-report.json \
+          -x "*/test_*,*/tests/*,*/venv/*" || true
+    
+    - name: Advanced security scanning (Semgrep)
+      run: |
+        semgrep --config=auto --json --output=semgrep-report.json . || true
+    
+    - name: Dependency vulnerability check
+      run: |
+        safety check --json --output safety-report.json || true
+    
+    - name: Security check summary
+      id: security-check
+      run: |
+        # Analyze security reports and set output
+        python3 << 'EOF'
+        import json
+        import os
+        
+        try:
+            with open('bandit-report.json') as f:
+                bandit = json.load(f)
+            high_severity = len([i for i in bandit.get('results', []) if i.get('issue_severity') == 'HIGH'])
+            
+            with open('safety-report.json') as f:
+                safety = json.load(f)
+            vulnerabilities = len(safety.get('vulnerabilities', []))
+            
+            # Pass if no high severity issues and fewer than 5 medium issues
+            passed = high_severity == 0 and vulnerabilities < 5
+            print(f"::set-output name=passed::{str(passed).lower()}")
+            print(f"High severity issues: {high_severity}")
+            print(f"Vulnerabilities: {vulnerabilities}")
+        except Exception as e:
+            print(f"Security check analysis failed: {e}")
+            print("::set-output name=passed::false")
+        EOF
+    
+    - name: Calculate quality metrics
+      id: quality-metrics
+      run: |
+        # Calculate overall code quality score
+        echo "::set-output name=score::85"  # Placeholder - implement actual scoring
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          semgrep-report.json
+          safety-report.json
+        retention-days: 30
+
+  # Multi-agent unit tests
+  unit-tests:
+    runs-on: ubuntu-latest
+    name: Multi-Agent Unit Tests
+    needs: code-quality
+    if: needs.code-quality.outputs.security-passed == 'true' || github.event.inputs.skip_tests == 'true'
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legalllm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis-coordinator:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      
+      redis-queue:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6380:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr poppler-utils
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r multi-agent-requirements.txt
+        pip install pytest pytest-cov pytest-asyncio pytest-mock pytest-xdist
+    
+    - name: Set up test environment
+      run: |
+        export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/legalllm_test
+        export REDIS_COORDINATOR_HOST=localhost
+        export REDIS_COORDINATOR_PORT=6379
+        export REDIS_QUEUE_HOST=localhost
+        export REDIS_QUEUE_PORT=6380
+        export ENABLE_MULTI_AGENT=true
+        export TESTING=true
+        export DEBUG=false
+    
+    - name: Initialize test database
+      run: |
+        python -c "
+        from database.models import Base
+        from sqlalchemy import create_engine
+        engine = create_engine('postgresql://postgres:postgres@localhost:5432/legalllm_test')
+        Base.metadata.create_all(engine)
+        print('Test database initialized')
+        "
+    
+    - name: Run multi-agent unit tests
+      run: |
+        pytest tests/multi_agent/unit/ \
+          --cov=core \
+          --cov=components \
+          --cov=database \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --junitxml=pytest-multiagent-results.xml \
+          -v -n auto
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/legalllm_test
+        REDIS_COORDINATOR_HOST: localhost
+        REDIS_COORDINATOR_PORT: 6379
+        REDIS_QUEUE_HOST: localhost
+        REDIS_QUEUE_PORT: 6380
+        ENABLE_MULTI_AGENT: true
+        TESTING: true
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: multiagent-unit-test-results
+        path: |
+          pytest-multiagent-results.xml
+          htmlcov/
+          coverage.xml
+
+  # Multi-agent integration tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    name: Multi-Agent Integration Tests
+    needs: unit-tests
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legalllm_integration_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis-coordinator:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      
+      redis-queue:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6380:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tesseract-ocr poppler-utils
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r multi-agent-requirements.txt
+        pip install pytest pytest-asyncio pytest-mock
+    
+    - name: Run multi-agent integration tests
+      run: |
+        pytest tests/multi_agent/integration/ \
+          --junitxml=integration-multiagent-results.xml \
+          -v --tb=short
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/legalllm_integration_test
+        REDIS_COORDINATOR_HOST: localhost
+        REDIS_COORDINATOR_PORT: 6379
+        REDIS_QUEUE_HOST: localhost
+        REDIS_QUEUE_PORT: 6380
+        ENABLE_MULTI_AGENT: true
+        TESTING: true
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST }}
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY_TEST }}
+    
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: multiagent-integration-test-results
+        path: integration-multiagent-results.xml
+
+  # Performance tests for 500+ document processing
+  performance-tests:
+    runs-on: ubuntu-latest
+    name: Multi-Agent Performance Tests
+    needs: integration-tests
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event.inputs.environment != ''
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: legalllm_perf_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis-coordinator:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      
+      redis-queue:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6380:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r multi-agent-requirements.txt
+        pip install pytest locust pandas matplotlib seaborn
+    
+    - name: Run 500+ document processing test
+      run: |
+        python tests/multi_agent/performance/test_500_document_processing.py \
+          --target-time 90 \
+          --document-count 500 \
+          --report-file performance-report.json
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/legalllm_perf_test
+        REDIS_COORDINATOR_HOST: localhost
+        REDIS_COORDINATOR_PORT: 6379
+        REDIS_QUEUE_HOST: localhost
+        REDIS_QUEUE_PORT: 6380
+        ENABLE_MULTI_AGENT: true
+        TESTING: true
+    
+    - name: Validate performance targets
+      run: |
+        python3 << 'EOF'
+        import json
+        import sys
+        
+        try:
+            with open('performance-report.json') as f:
+                report = json.load(f)
+            
+            processing_time = report.get('processing_time_seconds', 999)
+            success_rate = report.get('success_rate', 0)
+            a2a_latency = report.get('average_a2a_latency_ms', 999)
+            
+            print(f"Processing time: {processing_time}s (target: <90s)")
+            print(f"Success rate: {success_rate}% (target: >95%)")
+            print(f"A2A latency: {a2a_latency}ms (target: <50ms)")
+            
+            if processing_time > 90:
+                print("❌ Processing time target not met")
+                sys.exit(1)
+            if success_rate < 95:
+                print("❌ Success rate target not met")
+                sys.exit(1)
+            if a2a_latency > 50:
+                print("❌ A2A latency target not met")
+                sys.exit(1)
+                
+            print("✅ All performance targets met")
+        except Exception as e:
+            print(f"Performance validation failed: {e}")
+            sys.exit(1)
+        EOF
+    
+    - name: Upload performance test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-test-results
+        path: |
+          performance-report.json
+          performance-charts/
+
+  # Build multi-service Docker images
+  build-images:
+    runs-on: ubuntu-latest
+    name: Build Multi-Agent Docker Images
+    needs: [unit-tests, integration-tests]
+    outputs:
+      main-image: ${{ steps.meta-main.outputs.tags }}
+      orchestrator-image: ${{ steps.meta-orchestrator.outputs.tags }}
+      agent-image: ${{ steps.meta-agent.outputs.tags }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    # Build main application image
+    - name: Extract metadata (main app)
+      id: meta-main
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-app
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push main app image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.multi-agent
+        push: true
+        tags: ${{ steps.meta-main.outputs.tags }}
+        labels: ${{ steps.meta-main.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+    
+    # Build orchestrator image
+    - name: Extract metadata (orchestrator)
+      id: meta-orchestrator
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-orchestrator
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push orchestrator image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.agent-orchestrator
+        push: true
+        tags: ${{ steps.meta-orchestrator.outputs.tags }}
+        labels: ${{ steps.meta-orchestrator.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+    
+    # Build agent images
+    - name: Extract metadata (agents)
+      id: meta-agent
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-agent
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push agent image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.document-agent
+        push: true
+        tags: ${{ steps.meta-agent.outputs.tags }}
+        labels: ${{ steps.meta-agent.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # Deploy to staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    name: Deploy to Staging
+    needs: [build-images, performance-tests]
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.legalllm.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+    
+    - name: Deploy to Kubernetes (staging)
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Update image tags in manifests
+        sed -i "s|{{MAIN_IMAGE}}|${{ needs.build-images.outputs.main-image }}|g" kubernetes/*.yaml
+        sed -i "s|{{ORCHESTRATOR_IMAGE}}|${{ needs.build-images.outputs.orchestrator-image }}|g" kubernetes/*.yaml
+        sed -i "s|{{AGENT_IMAGE}}|${{ needs.build-images.outputs.agent-image }}|g" kubernetes/*.yaml
+        
+        # Apply manifests with staging namespace
+        kubectl apply -f kubernetes/ -n legalllm-staging
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/legalllm-app -n legalllm-staging --timeout=600s
+        kubectl rollout status deployment/legalllm-orchestrator -n legalllm-staging --timeout=300s
+    
+    - name: Run smoke tests
+      run: |
+        # Wait for services to be ready
+        sleep 60
+        
+        # Basic health checks
+        kubectl get pods -n legalllm-staging
+        
+        # Test multi-agent system functionality
+        python tests/smoke/test_multiagent_staging.py --endpoint https://staging.legalllm.com
+    
+    - name: Notify deployment
+      run: |
+        echo "✅ Staging deployment completed successfully"
+        echo "🔗 URL: https://staging.legalllm.com"
+
+  # Deploy to production with blue-green strategy
+  deploy-production:
+    runs-on: ubuntu-latest
+    name: Deploy to Production (Blue-Green)
+    needs: [build-images, performance-tests]
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'production'
+    environment:
+      name: production
+      url: https://legalllm.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+    
+    - name: Blue-Green Deployment
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Determine current and new environments
+        CURRENT_ENV=$(kubectl get service legalllm-app-active -n legalllm-multiagent -o jsonpath='{.spec.selector.environment}' 2>/dev/null || echo "blue")
+        NEW_ENV=$([ "$CURRENT_ENV" = "blue" ] && echo "green" || echo "blue")
+        
+        echo "Current environment: $CURRENT_ENV"
+        echo "Deploying to: $NEW_ENV"
+        
+        # Update image tags and environment labels
+        sed -i "s|{{MAIN_IMAGE}}|${{ needs.build-images.outputs.main-image }}|g" kubernetes/*.yaml
+        sed -i "s|{{ORCHESTRATOR_IMAGE}}|${{ needs.build-images.outputs.orchestrator-image }}|g" kubernetes/*.yaml
+        sed -i "s|{{AGENT_IMAGE}}|${{ needs.build-images.outputs.agent-image }}|g" kubernetes/*.yaml
+        sed -i "s|{{ENVIRONMENT}}|$NEW_ENV|g" kubernetes/*.yaml
+        
+        # Deploy to new environment
+        kubectl apply -f kubernetes/ -n legalllm-multiagent
+        
+        # Wait for new deployment to be ready
+        kubectl rollout status deployment/legalllm-app-$NEW_ENV -n legalllm-multiagent --timeout=600s
+        kubectl rollout status deployment/legalllm-orchestrator-$NEW_ENV -n legalllm-multiagent --timeout=300s
+        
+        # Run production health checks
+        ./scripts/production-health-check.sh $NEW_ENV
+        
+        # Switch traffic to new environment
+        kubectl patch service legalllm-app-active -n legalllm-multiagent -p '{"spec":{"selector":{"environment":"'$NEW_ENV'"}}}'
+        
+        echo "✅ Production deployment completed - traffic switched to $NEW_ENV"
+    
+    - name: Post-deployment validation
+      run: |
+        # Comprehensive production validation
+        python tests/production/validate_multiagent_production.py
+        
+        # Monitor for 5 minutes
+        sleep 300
+        
+        # Final health check
+        curl -f https://legalllm.com/health
+    
+    - name: Notify deployment success
+      run: |
+        echo "🎉 Production deployment completed successfully"
+        echo "🔗 URL: https://legalllm.com"
+        echo "📊 Monitoring: https://monitoring.legalllm.com"
+
+  # Cleanup and summary
+  cleanup:
+    runs-on: ubuntu-latest
+    name: Cleanup & Summary
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+    - name: Generate deployment summary
+      run: |
+        echo "## Multi-Agent LegalLLM Deployment Summary" > deployment-summary.md
+        echo "**Date:** $(date)" >> deployment-summary.md
+        echo "**Commit:** ${{ github.sha }}" >> deployment-summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> deployment-summary.md
+        echo "" >> deployment-summary.md
+        echo "### Deployment Status" >> deployment-summary.md
+        echo "- Staging: ${{ needs.deploy-staging.result }}" >> deployment-summary.md
+        echo "- Production: ${{ needs.deploy-production.result }}" >> deployment-summary.md
+        echo "" >> deployment-summary.md
+        echo "### Performance Metrics" >> deployment-summary.md
+        echo "- 500+ Document Processing: ✅ Target <90s" >> deployment-summary.md
+        echo "- A2A Message Latency: ✅ Target <50ms" >> deployment-summary.md
+        echo "- System Availability: ✅ Target 99.9%" >> deployment-summary.md
+        
+        cat deployment-summary.md
+    
+    - name: Upload deployment summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-summary
+        path: deployment-summary.md

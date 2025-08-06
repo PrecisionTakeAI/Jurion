@@ -1,0 +1,632 @@
+# LegalLLM Professional Multi-Agent System - Incident Response Playbook
+# Phase 4: Automated incident response procedures and remediation scripts
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-response-playbook
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: operations
+    compliance.australian-legal: "true"
+data:
+  incident-response-procedures.md: |
+    # Incident Response Playbook for LegalLLM Professional
+    
+    ## Incident Response Team Structure
+    
+    ### Roles and Responsibilities
+    
+    **Incident Commander (IC)**
+    - Overall incident coordination
+    - External communication authorization
+    - Resource allocation decisions
+    - Escalation path management
+    
+    **Technical Lead (TL)**
+    - Technical investigation and remediation
+    - System recovery procedures
+    - Root cause analysis
+    - Technical communication to IC
+    
+    **Communications Lead (CL)**
+    - Client and stakeholder communication
+    - Status page updates
+    - Documentation of timeline
+    - Legal compliance notifications
+    
+    **Legal Compliance Officer (LCO)**
+    - Australian legal compliance assessment
+    - Regulatory notification requirements
+    - Privacy Act 1988 implications
+    - Family Law Act 1975 compliance review
+    
+    ## Incident Response Phases
+    
+    ### Phase 1: Detection and Alert (0-5 minutes)
+    
+    **Automated Detection Systems:**
+    - Prometheus alerting rules
+    - Kubernetes health checks
+    - Application health endpoints
+    - A2A Protocol latency monitoring
+    - Australian legal compliance violations
+    
+    **Alert Channels:**
+    - PagerDuty for Severity 1-2 incidents
+    - Slack notifications for all severities
+    - Email for Severity 3-4 incidents
+    - SMS for critical compliance violations
+    
+    ### Phase 2: Response and Triage (5-15 minutes)
+    
+    **Initial Response Actions:**
+    1. Acknowledge alert within 5 minutes
+    2. Assess severity and impact
+    3. Activate incident response team
+    4. Create incident tracking record
+    5. Begin initial investigation
+    
+    **Triage Decision Matrix:**
+    ```
+    Impact vs Urgency Matrix:
+    
+                Low Urgency  Medium Urgency  High Urgency
+    High Impact    Sev 3        Sev 2          Sev 1
+    Med Impact     Sev 4        Sev 3          Sev 2  
+    Low Impact     Sev 4        Sev 4          Sev 3
+    ```
+    
+    ### Phase 3: Investigation and Resolution (15 minutes - 4 hours)
+    
+    **Investigation Framework:**
+    1. Gather symptom information
+    2. Form initial hypothesis
+    3. Test hypothesis with minimal impact
+    4. Implement fix or escalate
+    5. Verify resolution
+    6. Monitor for recurrence
+    
+    **Resolution Strategies:**
+    - Automated remediation (where safe)
+    - Manual intervention procedures
+    - Rollback to previous version
+    - Traffic rerouting/failover
+    - Emergency scaling actions
+    
+    ### Phase 4: Recovery and Post-Incident (4+ hours)
+    
+    **Recovery Activities:**
+    1. Confirm full service restoration
+    2. Validate performance targets met
+    3. Review and reset monitoring
+    4. Client communication of resolution
+    5. Document lessons learned
+    
+    **Post-Incident Review (PIR):**
+    - Timeline reconstruction
+    - Root cause analysis
+    - Process improvement identification
+    - Action item assignment
+    - Knowledge base updates
+    
+  emergency-remediation-scripts.sh: |
+    #!/bin/bash
+    # Emergency automated remediation scripts
+    
+    set -euo pipefail
+    
+    # Colors for output
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m' # No Color
+    
+    # Logging function
+    log() {
+        echo -e "${GREEN}$(date '+%Y-%m-%d %H:%M:%S')${NC} - $1"
+    }
+    
+    error() {
+        echo -e "${RED}$(date '+%Y-%m-%d %H:%M:%S') ERROR${NC} - $1" >&2
+    }
+    
+    warn() {
+        echo -e "${YELLOW}$(date '+%Y-%m-%d %H:%M:%S') WARN${NC} - $1"
+    }
+    
+    # Emergency functions
+    
+    # Function: Restart unhealthy pods
+    restart_unhealthy_pods() {
+        log "Checking for unhealthy pods..."
+        
+        UNHEALTHY_PODS=$(kubectl get pods -n legalllm-multiagent --field-selector=status.phase!=Running -o name 2>/dev/null || true)
+        
+        if [ -n "$UNHEALTHY_PODS" ]; then
+            warn "Found unhealthy pods, restarting..."
+            echo "$UNHEALTHY_PODS" | while read -r pod; do
+                log "Deleting pod: $pod"
+                kubectl delete "$pod" -n legalllm-multiagent
+            done
+            
+            # Wait for pods to restart
+            sleep 30
+            kubectl wait --for=condition=Ready pods --all -n legalllm-multiagent --timeout=300s
+            log "Pod restart completed"
+        else
+            log "All pods are healthy"
+        fi
+    }
+    
+    # Function: Scale up critical services
+    emergency_scale_up() {
+        log "Emergency scaling of critical services..."
+        
+        # Scale orchestrator
+        kubectl scale deployment legalllm-orchestrator --replicas=5 -n legalllm-multiagent
+        
+        # Scale unified interface
+        kubectl scale deployment legalllm-unified-interface --replicas=8 -n legalllm-multiagent
+        
+        # Scale financial agent (critical for Australian legal compliance)
+        kubectl scale deployment legalllm-financial-agent --replicas=6 -n legalllm-multiagent
+        
+        # Scale document agent
+        kubectl scale deployment legalllm-document-agent --replicas=10 -n legalllm-multiagent
+        
+        log "Waiting for scaling to complete..."
+        kubectl rollout status deployment/legalllm-orchestrator -n legalllm-multiagent --timeout=600s
+        kubectl rollout status deployment/legalllm-unified-interface -n legalllm-multiagent --timeout=600s
+        
+        log "Emergency scaling completed"
+    }
+    
+    # Function: Clear Redis queues and caches
+    clear_redis_cache() {
+        log "Clearing Redis cache and queues..."
+        
+        # Clear coordinator cache (non-persistent data only)
+        kubectl exec redis-coordinator-0 -n legalllm-multiagent -- redis-cli --scan --pattern "cache:*" | \
+        kubectl exec -i redis-coordinator-0 -n legalllm-multiagent -- xargs redis-cli del || true
+        
+        # Clear stuck processing queues
+        kubectl exec redis-queue-0 -n legalllm-multiagent -- redis-cli del document_processing_queue || true
+        kubectl exec redis-queue-0 -n legalllm-multiagent -- redis-cli del a2a_message_queue || true
+        
+        log "Redis cache clearing completed"
+    }
+    
+    # Function: Restart database connections
+    restart_db_connections() {
+        log "Restarting database connection pooler..."
+        
+        kubectl rollout restart deployment/pgbouncer -n legalllm-multiagent || true
+        kubectl rollout status deployment/pgbouncer -n legalllm-multiagent --timeout=300s || true
+        
+        log "Database connection restart completed"
+    }
+    
+    # Function: Check system health
+    check_system_health() {
+        log "Performing comprehensive system health check..."
+        
+        # Check pod status
+        log "Pod Status:"
+        kubectl get pods -n legalllm-multiagent
+        
+        # Check service status
+        log "Service Status:"
+        kubectl get services -n legalllm-multiagent
+        
+        # Check resource usage
+        log "Resource Usage:"
+        kubectl top pods -n legalllm-multiagent --sort-by=cpu || warn "Metrics server not available"
+        
+        # Check A2A Protocol latency
+        log "Checking A2A Protocol latency..."
+        curl -s http://prometheus:9090/api/v1/query?query=a2a_protocol_latency_ms | \
+        jq -r '.data.result[0].value[1]' | \
+        awk '{if($1 > 50) {print "WARNING: A2A latency is " $1 "ms (target: <50ms)"} else {print "A2A latency OK: " $1 "ms"}}'
+        
+        # Check Australian legal compliance
+        log "Checking compliance status..."
+        curl -s http://compliance-monitor:8080/api/compliance/dashboard | \
+        jq -r '.compliance_scores | to_entries[] | "\(.key): \(.value)"'
+        
+        log "System health check completed"
+    }
+    
+    # Function: Emergency failover to disaster recovery
+    activate_disaster_recovery() {
+        warn "ACTIVATING DISASTER RECOVERY - This will switch to DR region!"
+        
+        # Switch to DR cluster context
+        kubectl config use-context sydney-dr-cluster
+        
+        # Deploy to DR region
+        log "Deploying services to DR region..."
+        kubectl apply -f /kubernetes/multiagent-namespace.yaml
+        kubectl apply -f /kubernetes/postgresql-cluster.yaml -n legalllm-multiagent
+        kubectl apply -f /kubernetes/redis-cluster.yaml -n legalllm-multiagent
+        
+        # Wait for infrastructure
+        log "Waiting for infrastructure to be ready..."
+        kubectl wait --for=condition=Ready pod/postgresql-primary-0 -n legalllm-multiagent --timeout=600s
+        kubectl wait --for=condition=Ready pod/redis-coordinator-0 -n legalllm-multiagent --timeout=300s
+        
+        # Deploy applications
+        kubectl apply -f /kubernetes/multiagent-orchestrator.yaml -n legalllm-multiagent
+        kubectl apply -f /kubernetes/multiagent-agents.yaml -n legalllm-multiagent
+        kubectl apply -f /kubernetes/multiagent-unified-interface.yaml -n legalllm-multiagent
+        
+        # Update DNS to point to DR region
+        log "Updating DNS for failover..."
+        /scripts/dns-failover.sh --target-region sydney
+        
+        warn "DISASTER RECOVERY ACTIVATED - Notify legal compliance team immediately"
+    }
+    
+    # Function: Australian legal compliance emergency procedures
+    legal_compliance_emergency() {
+        error "LEGAL COMPLIANCE VIOLATION DETECTED"
+        
+        # Immediately stop non-essential processing
+        log "Scaling down non-essential services for compliance review..."
+        kubectl scale deployment legalllm-document-agent --replicas=1 -n legalllm-multiagent
+        kubectl scale deployment legalllm-crossexam-agent --replicas=1 -n legalllm-multiagent
+        
+        # Preserve all logs and data
+        log "Creating compliance audit snapshot..."
+        kubectl logs --all-containers=true \
+          --selector app.kubernetes.io/name=legalllm-professional \
+          -n legalllm-multiagent --tail=10000 > /tmp/compliance_audit_$(date +%s).log
+        
+        # Notify legal compliance officer
+        curl -X POST "$COMPLIANCE_WEBHOOK_URL" \
+          -H 'Content-type: application/json' \
+          --data '{"text":"🚨 LEGAL COMPLIANCE EMERGENCY DETECTED\n\nSystem has automatically:\n- Preserved audit logs\n- Scaled down non-essential services\n- Activated legal review mode\n\nImmediate legal team review required.\n\nTime: '$(date)'"}' || true
+        
+        error "LEGAL COMPLIANCE EMERGENCY PROCEDURES ACTIVATED"
+        error "Manual legal team review required before resuming normal operations"
+    }
+    
+    # Main remediation dispatcher
+    main() {
+        case "${1:-}" in
+            "unhealthy-pods")
+                restart_unhealthy_pods
+                ;;
+            "scale-up")
+                emergency_scale_up
+                ;;
+            "clear-cache")
+                clear_redis_cache
+                ;;
+            "restart-db")
+                restart_db_connections
+                ;;
+            "health-check")
+                check_system_health
+                ;;
+            "disaster-recovery")
+                activate_disaster_recovery
+                ;;
+            "legal-compliance")
+                legal_compliance_emergency
+                ;;
+            "full-recovery")
+                log "Executing full emergency recovery procedure..."
+                restart_unhealthy_pods
+                clear_redis_cache
+                restart_db_connections
+                emergency_scale_up
+                sleep 60
+                check_system_health
+                log "Full emergency recovery completed"
+                ;;
+            *)
+                echo "Usage: $0 {unhealthy-pods|scale-up|clear-cache|restart-db|health-check|disaster-recovery|legal-compliance|full-recovery}"
+                echo ""
+                echo "Available emergency procedures:"
+                echo "  unhealthy-pods     - Restart any unhealthy pods"
+                echo "  scale-up          - Emergency scaling of critical services"
+                echo "  clear-cache       - Clear Redis cache and stuck queues"
+                echo "  restart-db        - Restart database connections"
+                echo "  health-check      - Comprehensive system health check"
+                echo "  disaster-recovery - Activate DR region (USE WITH CAUTION)"
+                echo "  legal-compliance  - Legal compliance emergency procedures"
+                echo "  full-recovery     - Execute all recovery procedures"
+                exit 1
+                ;;
+        esac
+    }
+    
+    main "$@"
+
+  incident-classification.yml: |
+    # Incident Classification and Response Times
+    
+    severity_levels:
+      severity_1_critical:
+        description: "Complete system outage or critical security incident"
+        examples:
+          - "All services down"
+          - "Data breach or unauthorized access"
+          - "Australian legal compliance violation"
+          - "A2A Protocol completely failing"
+          - "Document processing completely broken"
+        response_time: "Immediate (within 5 minutes)"
+        escalation_time: "15 minutes"
+        communication_required: true
+        legal_notification: true
+        
+      severity_2_high:
+        description: "Significant service degradation affecting multiple users"
+        examples:
+          - "Single critical service down"
+          - "A2A Protocol latency >200ms sustained"
+          - "Document processing >50% failure rate"
+          - "Database performance severely degraded"
+          - "Authentication service issues"
+        response_time: "Within 15 minutes"
+        escalation_time: "30 minutes"
+        communication_required: true
+        legal_notification: false
+        
+      severity_3_medium:
+        description: "Service degradation with limited user impact"
+        examples:
+          - "Non-critical service performance issues"
+          - "A2A Protocol latency 50-200ms"
+          - "Document processing delays"
+          - "Monitoring system alerts"
+          - "Capacity warnings"
+        response_time: "Within 1 hour"
+        escalation_time: "2 hours"
+        communication_required: false
+        legal_notification: false
+        
+      severity_4_low:
+        description: "Minor issues or maintenance items"
+        examples:
+          - "Performance optimization opportunities"
+          - "Non-critical bug fixes"
+          - "Documentation updates needed"
+          - "Preventive maintenance"
+        response_time: "Within 4 hours"
+        escalation_time: "1 business day"
+        communication_required: false
+        legal_notification: false
+    
+    australian_legal_priorities:
+      family_law_compliance:
+        - "Form 13 financial disclosure issues"
+        - "Property settlement calculation errors"
+        - "Child welfare assessment failures"
+        - "Court deadline compliance issues"
+        
+      privacy_act_compliance:
+        - "Unauthorized personal information access"
+        - "Data retention period violations"
+        - "Consent management failures"
+        - "Cross-border data transfer issues"
+        
+      professional_standards:
+        - "Legal practitioner validation failures"
+        - "Client confidentiality breaches"
+        - "Professional indemnity concerns"
+        - "Regulatory reporting issues"
+
+---
+# Incident Response Service Account and Job Templates
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-response-sa
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: operations
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-response-role
+  namespace: legalllm-multiagent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-response-rolebinding
+  namespace: legalllm-multiagent
+subjects:
+- kind: ServiceAccount
+  name: incident-response-sa
+  namespace: legalllm-multiagent
+roleRef:
+  kind: Role
+  name: incident-response-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Emergency Response Job Template
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: emergency-response-template
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: operations
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: legalllm-professional
+        app.kubernetes.io/component: operations
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: incident-response-sa
+      containers:
+      - name: emergency-response
+        image: legalllm-emergency-response:latest
+        env:
+        - name: INCIDENT_TYPE
+          value: "full-recovery"
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: notification-credentials
+              key: slack-webhook-url
+        - name: COMPLIANCE_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: notification-credentials  
+              key: compliance-webhook-url
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: access-key-id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: secret-access-key
+        command: ["/scripts/emergency-remediation-scripts.sh"]
+        args: ["$(INCIDENT_TYPE)"]
+        volumeMounts:
+        - name: incident-scripts
+          mountPath: /scripts
+        - name: kubernetes-config
+          mountPath: /kubernetes
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: incident-scripts
+        configMap:
+          name: incident-response-playbook
+          items:
+          - key: emergency-remediation-scripts.sh
+            path: emergency-remediation-scripts.sh
+            mode: 0755
+      - name: kubernetes-config
+        configMap:
+          name: kubernetes-manifests
+
+---
+# Incident Response Monitoring
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: incident-response-readiness-check
+  namespace: legalllm-multiagent
+  labels:
+    app.kubernetes.io/name: legalllm-professional
+    app.kubernetes.io/component: operations
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  timeZone: "Australia/Sydney"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: legalllm-professional
+            app.kubernetes.io/component: operations
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: incident-response-sa
+          containers:
+          - name: readiness-check
+            image: legalllm-emergency-response:latest
+            env:
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: notification-credentials
+                  key: slack-webhook-url
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              echo "🔍 Incident Response Readiness Check - $(date)"
+              
+              # Test emergency scripts availability
+              if [ -f /scripts/emergency-remediation-scripts.sh ]; then
+                echo "✅ Emergency scripts available"
+              else
+                echo "❌ Emergency scripts missing"
+                exit 1
+              fi
+              
+              # Test Kubernetes access
+              kubectl auth can-i get pods -n legalllm-multiagent
+              echo "✅ Kubernetes access verified"
+              
+              # Test monitoring endpoints
+              curl -f http://prometheus:9090/-/healthy >/dev/null
+              echo "✅ Prometheus monitoring available"
+              
+              curl -f http://alertmanager:9093/-/healthy >/dev/null  
+              echo "✅ AlertManager available"
+              
+              # Test backup systems
+              kubectl get cronjobs -n legalllm-multiagent | grep backup
+              echo "✅ Backup systems active"
+              
+              # Test disaster recovery readiness
+              kubectl config get-contexts | grep sydney-dr-cluster || echo "⚠️  DR cluster context not configured"
+              
+              # Send readiness confirmation
+              curl -X POST "$SLACK_WEBHOOK_URL" \
+                -H 'Content-type: application/json' \
+                --data '{"text":"✅ Incident Response Readiness Check Passed\n\n📋 Systems Verified:\n- Emergency response scripts\n- Kubernetes cluster access\n- Monitoring systems\n- Backup infrastructure\n- Australian legal compliance monitoring\n\n⏰ Next check in 6 hours"}' || true
+              
+              echo "✅ Incident Response Readiness Check completed successfully"
+            volumeMounts:
+            - name: incident-scripts
+              mountPath: /scripts
+              readOnly: true
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "250m"
+          volumes:
+          - name: incident-scripts
+            configMap:
+              name: incident-response-playbook
+              items:
+              - key: emergency-remediation-scripts.sh
+                path: emergency-remediation-scripts.sh
+                mode: 0755

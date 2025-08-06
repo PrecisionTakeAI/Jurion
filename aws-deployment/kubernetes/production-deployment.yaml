@@ -1,0 +1,593 @@
+# LegalLLM Professional - Production Kubernetes Deployment
+# Multi-agent legal AI platform optimized for Australian family law
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: legalllm-production
+  labels:
+    name: legalllm-production
+    compliance: "privacy-act-1988"
+    data-classification: "legal-confidential"
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: legalllm-config
+  namespace: legalllm-production
+data:
+  # Application Configuration
+  APP_NAME: "LegalLLM Professional"
+  ENVIRONMENT: "production"
+  DEBUG: "false"
+  
+  # Performance Configuration
+  MAX_FILE_SIZE_MB: "50"
+  DB_POOL_SIZE: "20"
+  DB_MAX_OVERFLOW: "30"
+  DB_POOL_TIMEOUT: "30"
+  CACHE_DEFAULT_TTL: "3600"
+  CACHE_AI_RESPONSE_TTL: "7200"
+  
+  # Security Configuration
+  SESSION_TIMEOUT_HOURS: "8"
+  MAX_FAILED_ATTEMPTS: "5"
+  LOCKOUT_DURATION_MINUTES: "30"
+  
+  # Australian Legal Configuration
+  DEFAULT_JURISDICTION: "australia"
+  COMPLIANCE_MODE: "privacy-act-1988"
+  AUDIT_LOGGING: "enabled"
+  
+  # Multi-Agent Configuration
+  AGENT_ORCHESTRATOR_ENABLED: "true"
+  MAX_CONCURRENT_AGENTS: "10"
+  A2A_PROTOCOL_ENABLED: "true"
+  AGENT_COMMUNICATION_TIMEOUT: "30"
+
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: legalllm-secrets
+  namespace: legalllm-production
+type: Opaque
+stringData:
+  # Database secrets (will be populated from Terraform outputs)
+  DATABASE_URL: "postgresql://user:password@rds-endpoint:5432/legalllm"
+  DB_PASSWORD: "secure-password"
+  
+  # Cache secrets
+  REDIS_AUTH_TOKEN: "redis-auth-token"
+  
+  # AI API Keys
+  OPENAI_API_KEY: "openai-api-key"
+  GROQ_API_KEY: "groq-api-key"
+  
+  # Encryption keys
+  AES_ENCRYPTION_KEY: "32-byte-aes-key"
+  JWT_SECRET_KEY: "jwt-secret-key"
+
+---
+# Persistent Volume Claim for document storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legalllm-documents-pvc
+  namespace: legalllm-production
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 1Ti
+
+---
+# StorageClass for EFS
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: fs-xxxxxxxxx  # Will be replaced with actual EFS ID
+  directoryPerms: "0755"
+
+---
+# Deployment for main LegalLLM application
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalllm-app
+  namespace: legalllm-production
+  labels:
+    app: legalllm-app
+    tier: application
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: legalllm-app
+  template:
+    metadata:
+      labels:
+        app: legalllm-app
+        tier: application
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: legalllm-service-account
+      nodeSelector:
+        workload: core
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: core
+          effect: NoSchedule
+      containers:
+      - name: legalllm-app
+        image: legalllm/professional:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8501
+          name: streamlit
+        - containerPort: 8080
+          name: metrics
+        env:
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: legalllm-config
+              key: ENVIRONMENT
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: DATABASE_URL
+        - name: REDIS_HOST
+          value: "legalllm-redis-service"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: REDIS_AUTH_TOKEN
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: OPENAI_API_KEY
+        - name: GROQ_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: GROQ_API_KEY
+        - name: AES_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: AES_ENCRYPTION_KEY
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: document-storage
+          mountPath: /app/documents
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /_stcore/health
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+      volumes:
+      - name: document-storage
+        persistentVolumeClaim:
+          claimName: legalllm-documents-pvc
+      - name: logs
+        emptyDir: {}
+
+---
+# Service for main application
+apiVersion: v1
+kind: Service
+metadata:
+  name: legalllm-app-service
+  namespace: legalllm-production
+  labels:
+    app: legalllm-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8501
+    targetPort: 8501
+    protocol: TCP
+    name: streamlit
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: metrics
+  selector:
+    app: legalllm-app
+
+---
+# Deployment for Agent Orchestrator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalllm-agent-orchestrator
+  namespace: legalllm-production
+  labels:
+    app: legalllm-agent-orchestrator
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legalllm-agent-orchestrator
+  template:
+    metadata:
+      labels:
+        app: legalllm-agent-orchestrator
+        tier: agent
+    spec:
+      serviceAccountName: legalllm-service-account
+      nodeSelector:
+        workload: ai-processing
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: ai-processing
+          effect: NoSchedule
+      containers:
+      - name: agent-orchestrator
+        image: legalllm/agent-orchestrator:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: api
+        env:
+        - name: REDIS_HOST
+          value: "legalllm-redis-service"
+        - name: REDIS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: REDIS_AUTH_TOKEN
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: DATABASE_URL
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1500m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+
+---
+# Service for Agent Orchestrator
+apiVersion: v1
+kind: Service
+metadata:
+  name: legalllm-agent-orchestrator-service
+  namespace: legalllm-production
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: legalllm-agent-orchestrator
+
+---
+# Deployment for Document Analysis Agent
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalllm-document-agent
+  namespace: legalllm-production
+  labels:
+    app: legalllm-document-agent
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legalllm-document-agent
+  template:
+    metadata:
+      labels:
+        app: legalllm-document-agent
+        tier: agent
+    spec:
+      serviceAccountName: legalllm-service-account
+      nodeSelector:
+        workload: ai-processing
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: ai-processing
+          effect: NoSchedule
+      containers:
+      - name: document-agent
+        image: legalllm/document-agent:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8001
+          name: api
+        env:
+        - name: REDIS_HOST
+          value: "legalllm-redis-service"
+        - name: REDIS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: REDIS_AUTH_TOKEN
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: OPENAI_API_KEY
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        resources:
+          requests:
+            memory: "1.5Gi"
+            cpu: "750m"
+          limits:
+            memory: "3Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: document-storage
+          mountPath: /app/documents
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+      volumes:
+      - name: document-storage
+        persistentVolumeClaim:
+          claimName: legalllm-documents-pvc
+
+---
+# Service for Document Agent
+apiVersion: v1
+kind: Service
+metadata:
+  name: legalllm-document-agent-service
+  namespace: legalllm-production
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8001
+    targetPort: 8001
+    protocol: TCP
+  selector:
+    app: legalllm-document-agent
+
+---
+# Deployment for Financial Analysis Agent
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legalllm-financial-agent
+  namespace: legalllm-production
+  labels:
+    app: legalllm-financial-agent
+    tier: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: legalllm-financial-agent
+  template:
+    metadata:
+      labels:
+        app: legalllm-financial-agent
+        tier: agent
+    spec:
+      serviceAccountName: legalllm-service-account
+      nodeSelector:
+        workload: ai-processing
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: ai-processing
+          effect: NoSchedule
+      containers:
+      - name: financial-agent
+        image: legalllm/financial-agent:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8002
+          name: api
+        env:
+        - name: REDIS_HOST
+          value: "legalllm-redis-service"
+        - name: REDIS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: REDIS_AUTH_TOKEN
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: DATABASE_URL
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: legalllm-secrets
+              key: OPENAI_API_KEY
+        envFrom:
+        - configMapRef:
+            name: legalllm-config
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1500m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+
+---
+# Horizontal Pod Autoscaler for main application
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: legalllm-app-hpa
+  namespace: legalllm-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: legalllm-app
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# ServiceAccount for pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: legalllm-service-account
+  namespace: legalllm-production
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/legalllm-pod-role
+
+---
+# Network Policy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: legalllm-network-policy
+  namespace: legalllm-production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: legalllm-production
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: legalllm-production
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443  # HTTPS
+    - protocol: TCP
+      port: 53   # DNS
+    - protocol: UDP
+      port: 53   # DNS
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: legalllm-ingress
+  namespace: legalllm-production
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:ACCOUNT-ID:certificate/CERT-ID
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/healthcheck-path: /_stcore/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '10'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+spec:
+  rules:
+  - host: legal.yourdomain.com.au
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: legalllm-app-service
+            port:
+              number: 8501
+  tls:
+  - hosts:
+    - legal.yourdomain.com.au

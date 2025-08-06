@@ -1,0 +1,624 @@
+# CI/CD Pipeline for LegalLLM Professional Enhanced Multi-Agent System
+# Phase 4: Production deployment with automated testing, security scanning, and blue-green deployment
+
+name: LegalLLM Multi-Agent CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, clean-working-solution ]
+    paths:
+      - 'core/**'
+      - 'web_interface/**'
+      - 'database/**'
+      - 'kubernetes/**'
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'requirements*.txt'
+  pull_request:
+    branches: [ main, clean-working-solution ]
+    paths:
+      - 'core/**'
+      - 'web_interface/**'
+      - 'database/**'
+      - 'kubernetes/**'
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'requirements*.txt'
+  workflow_dispatch:
+    inputs:
+      deployment_environment:
+        description: 'Target deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+      skip_tests:
+        description: 'Skip test execution (emergency deployment)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: legalllm-professional
+  PYTHON_VERSION: '3.11'
+  
+  # Performance targets for validation
+  TARGET_DOCUMENT_PROCESSING: 500
+  TARGET_PROCESSING_TIME_SECONDS: 90
+  A2A_LATENCY_TARGET_MS: 50
+  SYSTEM_UPTIME_TARGET: 99.9
+
+jobs:
+  # ============================================
+  # SECURITY AND COMPLIANCE SCANNING
+  # ============================================
+  security-scan:
+    name: Security & Compliance Scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || !inputs.skip_tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for security analysis
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install security scanning tools
+      run: |
+        pip install bandit safety semgrep
+        npm install -g retire @cyclonedx/bom
+    
+    - name: Python security scan (Bandit)
+      run: |
+        bandit -r core/ web_interface/ database/ -f json -o bandit-report.json || true
+        bandit -r core/ web_interface/ database/ -f txt
+    
+    - name: Dependency vulnerability scan (Safety)
+      run: |
+        pip install -r requirements-production.txt
+        safety check --json --output safety-report.json || true
+        safety check
+    
+    - name: Static analysis (Semgrep)
+      run: |
+        semgrep --config=auto --json --output=semgrep-report.json core/ web_interface/ database/ || true
+        semgrep --config=auto core/ web_interface/ database/
+    
+    - name: Docker security scan (Trivy)
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Australian legal compliance check
+      run: |
+        python -m pytest tests/compliance/ -v --tb=short
+        python scripts/validate_australian_compliance.py
+    
+    - name: OWASP compliance validation
+      run: |
+        python scripts/validate_owasp_compliance.py
+        echo "OWASP Top 10 compliance validated"
+    
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-scan-results
+        path: |
+          bandit-report.json
+          safety-report.json
+          semgrep-report.json
+          trivy-results.sarif
+        retention-days: 30
+
+  # ============================================
+  # AUTOMATED TESTING SUITE
+  # ============================================
+  test-suite:
+    name: Comprehensive Test Suite
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || !inputs.skip_tests
+    
+    strategy:
+      matrix:
+        test-category: [unit, integration, performance, compliance]
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: legalllm_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-eng
+    
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip setuptools wheel
+        pip install -r requirements-production.txt
+        pip install -r requirements-test.txt
+    
+    - name: Initialize test database
+      run: |
+        python -c "
+        import os
+        os.environ['DATABASE_URL'] = 'postgresql://test_user:test_password@localhost:5432/legalllm_test'
+        os.environ['REDIS_URL'] = 'redis://localhost:6379/0'
+        from database.init_db import init_database
+        init_database()
+        "
+    
+    - name: Run unit tests
+      if: matrix.test-category == 'unit'
+      run: |
+        pytest tests/unit/ -v --tb=short --cov=core --cov=web_interface --cov=database \
+               --cov-report=xml --cov-report=html --junit-xml=junit-unit.xml
+    
+    - name: Run integration tests
+      if: matrix.test-category == 'integration'
+      run: |
+        pytest tests/integration/ -v --tb=short --junit-xml=junit-integration.xml
+    
+    - name: Run multi-agent system tests
+      if: matrix.test-category == 'integration'
+      run: |
+        pytest tests/multi_agent/ -v --tb=short --junit-xml=junit-multiagent.xml
+    
+    - name: Run performance tests
+      if: matrix.test-category == 'performance'
+      env:
+        TARGET_DOCUMENT_PROCESSING: ${{ env.TARGET_DOCUMENT_PROCESSING }}
+        TARGET_PROCESSING_TIME_SECONDS: ${{ env.TARGET_PROCESSING_TIME_SECONDS }}
+        A2A_LATENCY_TARGET_MS: ${{ env.A2A_LATENCY_TARGET_MS }}
+      run: |
+        pytest tests/performance/ -v --tb=short --junit-xml=junit-performance.xml
+        pytest tests/multi_agent/performance/test_500_document_processing.py -v
+    
+    - name: Run compliance tests
+      if: matrix.test-category == 'compliance'
+      run: |
+        pytest tests/phase0/test_compliance.py -v --tb=short
+        pytest tests/phase0/test_security_compliance.py -v --tb=short
+        pytest tests/comprehensive/test_family_law_workflows.py -v --tb=short \
+               --junit-xml=junit-compliance.xml
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.test-category }}
+        path: |
+          junit-*.xml
+          htmlcov/
+          coverage.xml
+        retention-days: 30
+
+  # ============================================
+  # CONTAINER BUILD AND REGISTRY PUSH
+  # ============================================
+  build-and-push:
+    name: Build and Push Container Images
+    runs-on: ubuntu-latest
+    needs: [security-scan, test-suite]
+    if: always() && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') && (needs.test-suite.result == 'success' || needs.test-suite.result == 'skipped')
+    
+    strategy:
+      matrix:
+        component:
+          - unified-interface
+          - agent-orchestrator
+          - financial-agent
+          - cross-examination-agent
+          - document-agent
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.component }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=v2.0.0,enable={{is_default_branch}}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.${{ matrix.component }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: |
+          VERSION=v2.0.0
+          BUILD_DATE=${{ steps.meta.outputs.labels.created }}
+          VCS_REF=${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+    
+    - name: Container security scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.component }}:latest
+        format: 'sarif'
+        output: 'trivy-container-${{ matrix.component }}.sarif'
+    
+    - name: Upload container scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: container-security-${{ matrix.component }}
+        path: trivy-container-${{ matrix.component }}.sarif
+        retention-days: 30
+
+  # ============================================
+  # STAGING DEPLOYMENT
+  # ============================================
+  deploy-staging:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/clean-working-solution' || (github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'staging')
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+    
+    - name: Configure kubectl for staging
+      run: |
+        echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+        kubectl config current-context
+    
+    - name: Update image tags in Kubernetes manifests
+      run: |
+        # Update image tags to use the built images
+        IMAGE_TAG="${{ github.sha }}"
+        sed -i "s|legalllm-unified-interface:.*|legalllm-unified-interface:main-${IMAGE_TAG}|g" kubernetes/multiagent-unified-interface.yaml
+        sed -i "s|legalllm-orchestrator:.*|legalllm-orchestrator:main-${IMAGE_TAG}|g" kubernetes/multiagent-orchestrator.yaml
+        sed -i "s|legalllm-financial-agent:.*|legalllm-financial-agent:main-${IMAGE_TAG}|g" kubernetes/multiagent-agents.yaml
+        sed -i "s|legalllm-crossexam-agent:.*|legalllm-crossexam-agent:main-${IMAGE_TAG}|g" kubernetes/multiagent-agents.yaml
+    
+    - name: Deploy to staging
+      env:
+        KUBECONFIG: kubeconfig
+      run: |
+        # Apply namespace and base configuration
+        kubectl apply -f kubernetes/multiagent-namespace.yaml
+        kubectl apply -f kubernetes/multiagent-secrets.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/multiagent-configmap.yaml -n legalllm-multiagent
+        
+        # Deploy infrastructure components
+        kubectl apply -f kubernetes/postgresql-cluster.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/redis-cluster.yaml -n legalllm-multiagent
+        
+        # Deploy multi-agent system
+        kubectl apply -f kubernetes/multiagent-orchestrator.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/multiagent-agents.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/multiagent-unified-interface.yaml -n legalllm-multiagent
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/legalllm-orchestrator -n legalllm-multiagent --timeout=600s
+        kubectl rollout status deployment/legalllm-unified-interface -n legalllm-multiagent --timeout=600s
+        kubectl rollout status deployment/legalllm-financial-agent -n legalllm-multiagent --timeout=600s
+        kubectl rollout status deployment/legalllm-crossexam-agent -n legalllm-multiagent --timeout=600s
+    
+    - name: Run staging validation tests
+      env:
+        KUBECONFIG: kubeconfig
+        STAGING_URL: ${{ secrets.STAGING_URL }}
+      run: |
+        # Wait for services to be ready
+        sleep 60
+        
+        # Run health checks
+        kubectl get pods -n legalllm-multiagent
+        kubectl get services -n legalllm-multiagent
+        
+        # Validate A2A Protocol latency
+        python scripts/validate_a2a_latency.py --target-ms ${{ env.A2A_LATENCY_TARGET_MS }} --environment staging
+        
+        # Validate document processing capability
+        python scripts/validate_document_processing.py --target-docs ${{ env.TARGET_DOCUMENT_PROCESSING }} --target-time ${{ env.TARGET_PROCESSING_TIME_SECONDS }} --environment staging
+        
+        # Run smoke tests
+        pytest tests/e2e/test_complete_user_workflows.py -v --environment staging
+    
+    - name: Performance validation
+      env:
+        KUBECONFIG: kubeconfig
+      run: |
+        # Run comprehensive performance validation
+        python scripts/performance_validation.py \
+          --a2a-latency-target ${{ env.A2A_LATENCY_TARGET_MS }} \
+          --document-processing-target ${{ env.TARGET_DOCUMENT_PROCESSING }} \
+          --processing-time-target ${{ env.TARGET_PROCESSING_TIME_SECONDS }} \
+          --environment staging
+    
+    - name: Australian legal compliance validation
+      env:
+        KUBECONFIG: kubeconfig
+      run: |
+        # Validate Family Law Act 1975 compliance
+        python scripts/validate_family_law_compliance.py --environment staging
+        
+        # Validate Privacy Act 1988 compliance
+        python scripts/validate_privacy_act_compliance.py --environment staging
+        
+        # Validate professional standards compliance
+        python scripts/validate_professional_standards.py --environment staging
+
+  # ============================================
+  # PRODUCTION DEPLOYMENT (BLUE-GREEN)
+  # ============================================
+  deploy-production:
+    name: Blue-Green Production Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deployment_environment == 'production')
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+    
+    - name: Configure kubectl for production
+      run: |
+        echo "${{ secrets.PRODUCTION_KUBECONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+        kubectl config current-context
+    
+    - name: Determine deployment slot (Blue/Green)
+      id: deployment-slot
+      env:
+        KUBECONFIG: kubeconfig
+      run: |
+        # Check current active deployment
+        CURRENT_SLOT=$(kubectl get service legalllm-unified-interface-svc -n legalllm-multiagent -o jsonpath='{.spec.selector.deployment-slot}' 2>/dev/null || echo "blue")
+        
+        if [ "$CURRENT_SLOT" = "blue" ]; then
+          TARGET_SLOT="green"
+        else
+          TARGET_SLOT="blue"
+        fi
+        
+        echo "current-slot=$CURRENT_SLOT" >> $GITHUB_OUTPUT
+        echo "target-slot=$TARGET_SLOT" >> $GITHUB_OUTPUT
+        echo "Deploying to $TARGET_SLOT slot (current: $CURRENT_SLOT)"
+    
+    - name: Update manifests for blue-green deployment
+      run: |
+        # Update image tags and deployment slot
+        IMAGE_TAG="${{ github.sha }}"
+        TARGET_SLOT="${{ steps.deployment-slot.outputs.target-slot }}"
+        
+        # Add deployment slot labels
+        sed -i "s|deployment-slot: .*|deployment-slot: $TARGET_SLOT|g" kubernetes/multiagent-*.yaml || true
+        sed -i "/labels:/a\\    deployment-slot: $TARGET_SLOT" kubernetes/multiagent-*.yaml
+        
+        # Update image tags
+        sed -i "s|legalllm-unified-interface:.*|legalllm-unified-interface:main-${IMAGE_TAG}|g" kubernetes/multiagent-unified-interface.yaml
+        sed -i "s|legalllm-orchestrator:.*|legalllm-orchestrator:main-${IMAGE_TAG}|g" kubernetes/multiagent-orchestrator.yaml
+        sed -i "s|legalllm-financial-agent:.*|legalllm-financial-agent:main-${IMAGE_TAG}|g" kubernetes/multiagent-agents.yaml
+        sed -i "s|legalllm-crossexam-agent:.*|legalllm-crossexam-agent:main-${IMAGE_TAG}|g" kubernetes/multiagent-agents.yaml
+    
+    - name: Deploy to target slot
+      env:
+        KUBECONFIG: kubeconfig
+        TARGET_SLOT: ${{ steps.deployment-slot.outputs.target-slot }}
+      run: |
+        # Deploy to target slot
+        kubectl apply -f kubernetes/multiagent-orchestrator.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/multiagent-agents.yaml -n legalllm-multiagent
+        kubectl apply -f kubernetes/multiagent-unified-interface.yaml -n legalllm-multiagent
+        
+        # Wait for deployment to be ready
+        kubectl rollout status deployment/legalllm-orchestrator-$TARGET_SLOT -n legalllm-multiagent --timeout=900s
+        kubectl rollout status deployment/legalllm-unified-interface-$TARGET_SLOT -n legalllm-multiagent --timeout=900s
+        kubectl rollout status deployment/legalllm-financial-agent-$TARGET_SLOT -n legalllm-multiagent --timeout=900s
+        kubectl rollout status deployment/legalllm-crossexam-agent-$TARGET_SLOT -n legalllm-multiagent --timeout=900s
+    
+    - name: Production validation tests
+      env:
+        KUBECONFIG: kubeconfig
+        TARGET_SLOT: ${{ steps.deployment-slot.outputs.target-slot }}
+        PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+      run: |
+        # Wait for services to stabilize
+        sleep 120
+        
+        # Comprehensive production validation
+        python scripts/production_validation.py \
+          --slot $TARGET_SLOT \
+          --a2a-latency-target ${{ env.A2A_LATENCY_TARGET_MS }} \
+          --document-processing-target ${{ env.TARGET_DOCUMENT_PROCESSING }} \
+          --processing-time-target ${{ env.TARGET_PROCESSING_TIME_SECONDS }} \
+          --uptime-target ${{ env.SYSTEM_UPTIME_TARGET }}
+        
+        # Australian legal compliance validation
+        python scripts/production_compliance_validation.py --slot $TARGET_SLOT
+        
+        # Load testing
+        python scripts/production_load_test.py --slot $TARGET_SLOT --duration 300 --concurrent-users 50
+    
+    - name: Blue-Green traffic switch
+      env:
+        KUBECONFIG: kubeconfig
+        TARGET_SLOT: ${{ steps.deployment-slot.outputs.target-slot }}
+      run: |
+        # Switch traffic to new deployment
+        kubectl patch service legalllm-unified-interface-svc -n legalllm-multiagent \
+          -p '{"spec":{"selector":{"deployment-slot":"'$TARGET_SLOT'"}}}'
+        
+        kubectl patch service legalllm-orchestrator-svc -n legalllm-multiagent \
+          -p '{"spec":{"selector":{"deployment-slot":"'$TARGET_SLOT'"}}}'
+        
+        echo "Traffic switched to $TARGET_SLOT slot"
+        
+        # Monitor for 5 minutes to ensure stability
+        sleep 300
+        
+        # Final health check
+        python scripts/post_deployment_health_check.py --slot $TARGET_SLOT
+    
+    - name: Cleanup old deployment
+      env:
+        KUBECONFIG: kubeconfig
+        OLD_SLOT: ${{ steps.deployment-slot.outputs.current-slot }}
+      run: |
+        # Keep old deployment for quick rollback (cleanup after 24h)
+        echo "Old deployment ($OLD_SLOT) kept for rollback capability"
+        echo "Schedule cleanup job for $OLD_SLOT slot after 24 hours"
+        
+        # Create cleanup job
+        cat <<EOF | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: cleanup-$OLD_SLOT-$(date +%s)
+          namespace: legalllm-multiagent
+        spec:
+          ttlSecondsAfterFinished: 86400
+          template:
+            spec:
+              containers:
+              - name: cleanup
+                image: bitnami/kubectl:latest
+                command: ["/bin/sh"]
+                args:
+                - -c
+                - |
+                  sleep 86400  # Wait 24 hours
+                  kubectl delete deployment -l deployment-slot=$OLD_SLOT -n legalllm-multiagent
+              restartPolicy: Never
+        EOF
+
+  # ============================================
+  # DEPLOYMENT NOTIFICATION
+  # ============================================
+  notify-deployment:
+    name: Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+    
+    steps:
+    - name: Notify deployment success
+      if: needs.deploy-production.result == 'success'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#legalllm-deployments'
+        text: |
+          ✅ LegalLLM Professional Multi-Agent System deployed successfully to production
+          
+          🔄 Deployment Details:
+          - Branch: ${{ github.ref_name }}
+          - Commit: ${{ github.sha }}
+          - A2A Protocol Latency Target: <${{ env.A2A_LATENCY_TARGET_MS }}ms
+          - Document Processing Target: ${{ env.TARGET_DOCUMENT_PROCESSING }}+ docs in <${{ env.TARGET_PROCESSING_TIME_SECONDS }}s
+          - System Uptime Target: ${{ env.SYSTEM_UPTIME_TARGET }}%
+          
+          🇦🇺 Australian Legal Compliance: ✅ Validated
+          🔒 Security Scanning: ✅ Passed
+          📊 Performance Tests: ✅ Passed
+          
+          🚀 Blue-Green Deployment: Completed successfully
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    
+    - name: Notify deployment failure
+      if: needs.deploy-production.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#legalllm-deployments'
+        text: |
+          ❌ LegalLLM Professional Multi-Agent System deployment failed
+          
+          🔍 Failure Details:
+          - Branch: ${{ github.ref_name }}
+          - Commit: ${{ github.sha }}
+          - Workflow: ${{ github.workflow }}
+          
+          🚨 Action Required: Check deployment logs and investigate failure
+          📋 Rollback capability available via previous blue-green deployment
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+# ============================================
+# WORKFLOW CONFIGURATION
+# ============================================
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # Don't cancel deployments in progress

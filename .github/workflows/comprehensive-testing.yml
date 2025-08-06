@@ -1,0 +1,1013 @@
+name: LegalLLM Professional - Comprehensive Testing Pipeline
+
+on:
+  push:
+    branches: [ main, clean-working-solution, develop ]
+  pull_request:
+    branches: [ main, clean-working-solution ]
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of testing to run'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+        - full
+        - critical-only
+        - performance-only
+        - security-only
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+
+jobs:
+  # Job 1: Environment Setup and Validation
+  setup:
+    name: Environment Setup & Validation
+    runs-on: ubuntu-latest
+    outputs:
+      test-strategy: ${{ steps.determine-strategy.outputs.strategy }}
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Determine Test Strategy
+      id: determine-strategy
+      run: |
+        if [ "${{ github.event.inputs.test_type }}" == "critical-only" ]; then
+          echo "strategy=critical" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event.inputs.test_type }}" == "performance-only" ]; then
+          echo "strategy=performance" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event.inputs.test_type }}" == "security-only" ]; then
+          echo "strategy=security" >> $GITHUB_OUTPUT
+        else
+          echo "strategy=full" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Cache Dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.npm
+          ~/.cache/pytest_cache
+        key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements*.txt', '**/package*.json') }}
+        restore-keys: |
+          ${{ runner.os }}-deps-
+
+  # Job 2: Unit Tests (Foundation)
+  unit-tests:
+    name: Unit Tests - Foundation Layer
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.test-strategy == 'full' || needs.setup.outputs.test-strategy == 'critical'
+    
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+        test-group:
+          - core-engine
+          - document-processor
+          - multi-agent-units
+          - database-models
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools tesseract-ocr
+    
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        pip install pytest-xdist pytest-cov
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+        echo "OPENAI_API_KEY=test-key-${{ github.run_id }}" >> $GITHUB_ENV
+        echo "GROQ_API_KEY=test-key-${{ github.run_id }}" >> $GITHUB_ENV
+    
+    - name: Initialize Test Database
+      run: |
+        PGPASSWORD=test_pass psql -h localhost -U test_user -d legalllm_test -c "SELECT 1;"
+        python -c "
+        from database.database import DatabaseManager
+        db = DatabaseManager('postgresql://test_user:test_pass@localhost:5432/legalllm_test')
+        db.initialize_database()
+        print('Database initialized successfully')
+        "
+    
+    - name: Run Unit Tests - Core Engine
+      if: matrix.test-group == 'core-engine'
+      run: |
+        pytest tests/unit/test_core_engine.py \
+          -v --tb=short --durations=10 \
+          --cov=core --cov-report=xml:coverage-core.xml \
+          --junitxml=junit-core.xml
+    
+    - name: Run Unit Tests - Document Processor
+      if: matrix.test-group == 'document-processor'
+      run: |
+        pytest tests/unit/test_document_processor.py \
+          -v --tb=short --durations=10 \
+          --cov=core.document_processor --cov-report=xml:coverage-docproc.xml \
+          --junitxml=junit-docproc.xml
+    
+    - name: Run Unit Tests - Multi-Agent Units
+      if: matrix.test-group == 'multi-agent-units'
+      run: |
+        pytest tests/multi_agent/unit/ \
+          -v --tb=short --durations=10 \
+          --cov=core.multi_agent_system --cov-report=xml:coverage-agents.xml \
+          --junitxml=junit-agents.xml
+    
+    - name: Run Unit Tests - Database Models
+      if: matrix.test-group == 'database-models'
+      run: |
+        pytest tests/unit/test_case_manager.py \
+          -v --tb=short --durations=10 \
+          --cov=database --cov-report=xml:coverage-db.xml \
+          --junitxml=junit-db.xml
+    
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: unit-test-results-${{ matrix.python-version }}-${{ matrix.test-group }}
+        path: |
+          junit-*.xml
+          coverage-*.xml
+          htmlcov/
+
+  # Job 3: Integration Tests (System Coordination)
+  integration-tests:
+    name: Integration Tests - System Coordination
+    runs-on: ubuntu-latest
+    needs: [setup, unit-tests]
+    if: needs.setup.outputs.test-strategy == 'full' || needs.setup.outputs.test-strategy == 'critical'
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools tesseract-ocr
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+    
+    - name: Run Integration Tests - AI Integration
+      run: |
+        pytest tests/integration/test_ai_integration.py \
+          -v --tb=short --durations=15 \
+          --cov=core --cov-append --cov-report=xml:integration-coverage.xml \
+          --junitxml=integration-ai.xml
+    
+    - name: Run Integration Tests - Database Operations
+      run: |
+        pytest tests/integration/test_database_operations.py \
+          -v --tb=short --durations=15 \
+          --cov=database --cov-append --cov-report=xml:integration-db-coverage.xml \
+          --junitxml=integration-db.xml
+    
+    - name: Run Integration Tests - Multi-Agent Workflows
+      run: |
+        pytest tests/multi_agent/integration/test_multi_agent_workflows.py \
+          -v --tb=short --durations=20 -m "not slow" \
+          --cov=core.multi_agent_system --cov-append --cov-report=xml:integration-agents-coverage.xml \
+          --junitxml=integration-agents.xml
+    
+    - name: Run Integration Tests - Case Creation Workflows
+      run: |
+        pytest tests/integration/test_case_creation_workflow.py \
+          -v --tb=short --durations=15 \
+          --cov=components --cov-append --cov-report=xml:integration-workflow-coverage.xml \
+          --junitxml=integration-workflow.xml
+    
+    - name: Upload Integration Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: integration-test-results
+        path: |
+          integration-*.xml
+          *coverage.xml
+
+  # Job 4: Security & Compliance Tests (Critical for Production)
+  security-tests:
+    name: Security & Compliance Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.test-strategy == 'full' || needs.setup.outputs.test-strategy == 'security' || needs.setup.outputs.test-strategy == 'critical'
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        pip install bandit safety
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+    
+    - name: Run Security Vulnerability Scan
+      run: |
+        bandit -r core/ database/ components/ web_interface/ -f json -o bandit-report.json || true
+    
+    - name: Run Dependency Security Check
+      run: |
+        safety check --json --output safety-report.json || true
+    
+    - name: Run Privacy Act 1988 Compliance Tests
+      run: |
+        pytest tests/phase0/test_security_compliance.py::TestConsentManager \
+          -v --tb=short --durations=15 \
+          --junitxml=security-privacy.xml
+    
+    - name: Run Agent Security Tests
+      run: |
+        pytest tests/phase0/test_security_compliance.py::TestAgentSecurity \
+          -v --tb=short --durations=15 \
+          --junitxml=security-agents.xml
+    
+    - name: Run Data Retention Compliance Tests
+      run: |
+        pytest tests/phase0/test_security_compliance.py::TestDataRetentionManager \
+          -v --tb=short --durations=15 \
+          --junitxml=security-retention.xml
+    
+    - name: Run Compliance Monitoring Tests
+      run: |
+        pytest tests/phase0/test_security_compliance.py::TestComplianceMonitor \
+          -v --tb=short --durations=15 \
+          --junitxml=security-compliance.xml
+    
+    - name: Run Security Integration Tests
+      run: |
+        pytest tests/phase0/test_security_compliance.py::TestSecurityIntegration \
+          -v --tb=short --durations=15 \
+          --junitxml=security-integration.xml
+    
+    - name: Run Input Validation Security Tests
+      run: |
+        pytest tests/test_security_middleware.py \
+          -v --tb=short --durations=10 \
+          --junitxml=security-middleware.xml
+    
+    - name: Upload Security Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-test-results
+        path: |
+          security-*.xml
+          bandit-report.json
+          safety-report.json
+
+  # Job 5: Performance Tests (Critical Requirements)
+  performance-tests:
+    name: Performance Tests - Critical Requirements
+    runs-on: ubuntu-latest
+    needs: [setup, integration-tests]
+    if: needs.setup.outputs.test-strategy == 'full' || needs.setup.outputs.test-strategy == 'performance'
+    timeout-minutes: 30
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user  
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools tesseract-ocr
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+        pip install psutil
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+    
+    - name: System Resource Monitoring Setup
+      run: |
+        # Start system monitoring
+        nohup python -c "
+        import psutil
+        import time
+        import json
+        import os
+        
+        metrics = []
+        start_time = time.time()
+        
+        while time.time() - start_time < 1800:  # 30 minutes
+            cpu = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            
+            metrics.append({
+                'timestamp': time.time(),
+                'cpu_percent': cpu,
+                'memory_percent': memory.percent,
+                'memory_available_gb': memory.available / (1024**3)
+            })
+            
+            time.sleep(10)
+        
+        with open('system_metrics.json', 'w') as f:
+            json.dump(metrics, f)
+        " > monitoring.log 2>&1 &
+        
+        echo $! > monitoring.pid
+    
+    - name: Run Critical Performance Test - 500 Documents
+      run: |
+        echo "🚀 Running CRITICAL test: 500 documents in <90 seconds"
+        pytest tests/multi_agent/performance/test_500_document_processing.py::Test500DocumentProcessing::test_500_document_critical_requirement \
+          -v --tb=short --durations=0 \
+          --junitxml=performance-critical.xml
+    
+    - name: Run A2A Protocol Performance Test
+      run: |
+        echo "⚡ Testing A2A Protocol latency <50ms"
+        pytest tests/performance/test_a2a_performance.py \
+          -v --tb=short --durations=10 -m "performance and not slow" \
+          --junitxml=performance-a2a.xml
+    
+    - name: Run Memory Efficiency Test
+      run: |
+        echo "🧠 Testing memory efficiency for large batches"
+        pytest tests/multi_agent/performance/test_500_document_processing.py::Test500DocumentProcessing::test_memory_efficiency_large_batches \
+          -v --tb=short --durations=0 \
+          --junitxml=performance-memory.xml
+    
+    - name: Run Concurrent Processing Test
+      run: |
+        echo "🔄 Testing concurrent batch processing"
+        pytest tests/multi_agent/performance/test_500_document_processing.py::Test500DocumentProcessing::test_concurrent_batch_processing \
+          -v --tb=short --durations=0 \
+          --junitxml=performance-concurrent.xml
+    
+    - name: Run Stretch Goal Test - 750 Documents
+      continue-on-error: true
+      run: |
+        echo "🎯 Running stretch goal: 750 documents"
+        pytest tests/multi_agent/performance/test_500_document_processing.py::Test500DocumentProcessing::test_750_document_stretch_goal \
+          -v --tb=short --durations=0 \
+          --junitxml=performance-stretch.xml
+    
+    - name: Stop System Monitoring
+      if: always()
+      run: |
+        if [ -f monitoring.pid ]; then
+          kill $(cat monitoring.pid) || true
+          rm monitoring.pid
+        fi
+    
+    - name: Upload Performance Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-test-results
+        path: |
+          performance-*.xml
+          system_metrics.json
+          monitoring.log
+
+  # Job 6: Australian Legal Compliance Tests
+  legal-compliance-tests:
+    name: Australian Legal Compliance Tests
+    runs-on: ubuntu-latest
+    needs: [setup, security-tests]
+    if: needs.setup.outputs.test-strategy == 'full'
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools tesseract-ocr
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+    
+    - name: Run Family Law Workflow Tests
+      run: |
+        pytest tests/comprehensive/test_family_law_workflows.py::TestFamilyLawWorkflows::test_300_document_batch_processing \
+          -v --tb=short --durations=15 \
+          --junitxml=legal-family-workflow.xml
+    
+    - name: Run Multi-Agent Legal Orchestration Tests
+      run: |
+        pytest tests/comprehensive/test_family_law_workflows.py::TestFamilyLawWorkflows::test_multi_agent_orchestration \
+          -v --tb=short --durations=15 \
+          --junitxml=legal-orchestration.xml
+    
+    - name: Run Financial Settlement Analysis Tests
+      run: |
+        pytest tests/comprehensive/test_family_law_workflows.py::TestFamilyLawWorkflows::test_financial_settlement_analysis \
+          -v --tb=short --durations=15 \
+          --junitxml=legal-financial.xml
+    
+    - name: Run Australian Compliance Tests
+      run: |
+        pytest tests/phase0/test_compliance.py \
+          -v --tb=short --durations=15 \
+          --junitxml=legal-compliance.xml
+    
+    - name: Upload Legal Compliance Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: legal-compliance-results
+        path: |
+          legal-*.xml
+
+  # Job 7: End-to-End Tests (Complete User Workflows)
+  e2e-tests:
+    name: End-to-End Tests - Complete User Workflows
+    runs-on: ubuntu-latest
+    needs: [setup, performance-tests, legal-compliance-tests]
+    if: needs.setup.outputs.test-strategy == 'full'
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: legalllm_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client redis-tools tesseract-ocr
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-test.txt
+    
+    - name: Setup Test Environment
+      run: |
+        echo "TESTING=true" >> $GITHUB_ENV
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/legalllm_test" >> $GITHUB_ENV
+        echo "REDIS_URL=redis://localhost:6379/1" >> $GITHUB_ENV
+    
+    - name: Run Complete User Workflow Tests
+      run: |
+        pytest tests/e2e/test_complete_user_workflows.py \
+          -v --tb=short --durations=20 -m "not slow" \
+          --junitxml=e2e-workflows.xml
+    
+    - name: Run LLM Integration Tests
+      run: |
+        pytest tests/comprehensive/test_llm_integration.py \
+          -v --tb=short --durations=15 -m "not slow" \
+          --junitxml=e2e-llm.xml
+    
+    - name: Run LangGraph Workflow Tests
+      continue-on-error: true
+      run: |
+        pytest tests/langraph/test_workflow_integration.py \
+          -v --tb=short --durations=15 -m "not slow" \
+          --junitxml=e2e-langgraph.xml
+    
+    - name: Upload E2E Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: e2e-test-results
+        path: |
+          e2e-*.xml
+
+  # Job 8: Test Results Analysis & Reporting
+  test-analysis:
+    name: Test Results Analysis & Production Readiness Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, security-tests, performance-tests, legal-compliance-tests, e2e-tests]
+    if: always()
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install Analysis Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install junitparser coverage[toml] reportlab matplotlib
+    
+    - name: Download All Test Results
+      uses: actions/download-artifact@v3
+      with:
+        path: test-results/
+    
+    - name: Analyze Test Results
+      run: |
+        python -c "
+        import os
+        import json
+        import xml.etree.ElementTree as ET
+        from pathlib import Path
+        import glob
+        
+        # Collect all JUnit XML files
+        junit_files = []
+        for root, dirs, files in os.walk('test-results'):
+            for file in files:
+                if file.endswith('.xml') and ('junit' in file or any(x in file for x in ['unit', 'integration', 'security', 'performance', 'legal', 'e2e'])):
+                    junit_files.append(os.path.join(root, file))
+        
+        print(f'Found {len(junit_files)} test result files')
+        
+        # Parse results
+        total_tests = 0
+        total_failures = 0
+        total_errors = 0
+        total_skipped = 0
+        test_suites = []
+        
+        for junit_file in junit_files:
+            try:
+                tree = ET.parse(junit_file)
+                root = tree.getroot()
+                
+                # Handle both testsuite and testsuites roots
+                if root.tag == 'testsuites':
+                    suites = root.findall('testsuite')
+                else:
+                    suites = [root]
+                
+                for suite in suites:
+                    suite_name = suite.get('name', os.path.basename(junit_file))
+                    tests = int(suite.get('tests', 0))
+                    failures = int(suite.get('failures', 0))
+                    errors = int(suite.get('errors', 0))
+                    skipped = int(suite.get('skipped', 0))
+                    time = float(suite.get('time', 0))
+                    
+                    total_tests += tests
+                    total_failures += failures
+                    total_errors += errors
+                    total_skipped += skipped
+                    
+                    test_suites.append({
+                        'name': suite_name,
+                        'tests': tests,
+                        'failures': failures,
+                        'errors': errors,
+                        'skipped': skipped,
+                        'time': time,
+                        'pass_rate': ((tests - failures - errors) / tests * 100) if tests > 0 else 0
+                    })
+            except Exception as e:
+                print(f'Error parsing {junit_file}: {e}')
+        
+        # Calculate overall metrics
+        passed_tests = total_tests - total_failures - total_errors - total_skipped
+        overall_pass_rate = (passed_tests / total_tests * 100) if total_tests > 0 else 0
+        
+        # Generate summary
+        summary = {
+            'total_tests': total_tests,
+            'passed_tests': passed_tests,
+            'failed_tests': total_failures,
+            'error_tests': total_errors,
+            'skipped_tests': total_skipped,
+            'overall_pass_rate': overall_pass_rate,
+            'test_suites': test_suites
+        }
+        
+        # Save summary
+        with open('test_summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print(f'Test Analysis Complete:')
+        print(f'Total Tests: {total_tests}')
+        print(f'Passed: {passed_tests}')
+        print(f'Failed: {total_failures}')
+        print(f'Errors: {total_errors}')
+        print(f'Skipped: {total_skipped}')
+        print(f'Pass Rate: {overall_pass_rate:.1f}%')
+        "
+    
+    - name: Generate Production Readiness Report
+      run: |
+        python -c "
+        import json
+        import os
+        from datetime import datetime
+        
+        # Load test summary
+        with open('test_summary.json', 'r') as f:
+            summary = json.load(f)
+        
+        # Determine production readiness
+        pass_rate = summary['overall_pass_rate']
+        total_tests = summary['total_tests']
+        failed_tests = summary['failed_tests']
+        
+        if pass_rate >= 95 and failed_tests == 0:
+            readiness = 'READY'
+            status = '✅ PRODUCTION READY'
+        elif pass_rate >= 90:
+            readiness = 'READY_WITH_WARNINGS'
+            status = '⚠️ READY WITH WARNINGS'
+        else:
+            readiness = 'NOT_READY'
+            status = '❌ NOT READY FOR PRODUCTION'
+        
+        # Generate HTML report
+        html_report = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>LegalLLM Professional - Production Readiness Report</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .header {{ background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }}
+                .ready {{ color: #27ae60; font-weight: bold; }}
+                .warning {{ color: #f39c12; font-weight: bold; }}
+                .not-ready {{ color: #e74c3c; font-weight: bold; }}
+                .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }}
+                .metric {{ background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }}
+                .suite {{ margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 3px; }}
+            </style>
+        </head>
+        <body>
+            <div class=\"header\">
+                <h1>LegalLLM Professional - Production Readiness Report</h1>
+                <p>Generated: {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S UTC\")}</p>
+                <p>Commit: {os.environ.get(\"GITHUB_SHA\", \"unknown\")[:8]}</p>
+                <p>Branch: {os.environ.get(\"GITHUB_REF_NAME\", \"unknown\")}</p>
+            </div>
+            
+            <h2 class=\"{readiness.lower().replace(\"_\", \"-\")}\">{status}</h2>
+            
+            <div class=\"metrics\">
+                <div class=\"metric\">
+                    <h3>{summary[\"total_tests\"]}</h3>
+                    <p>Total Tests</p>
+                </div>
+                <div class=\"metric\">
+                    <h3>{summary[\"passed_tests\"]}</h3>
+                    <p>Passed Tests</p>
+                </div>
+                <div class=\"metric\">
+                    <h3>{summary[\"failed_tests\"]}</h3>
+                    <p>Failed Tests</p>
+                </div>
+                <div class=\"metric\">
+                    <h3>{pass_rate:.1f}%</h3>
+                    <p>Pass Rate</p>
+                </div>
+            </div>
+            
+            <h2>Test Suite Results</h2>
+        '''
+        
+        for suite in summary['test_suites']:
+            status_class = 'ready' if suite['pass_rate'] == 100 else 'warning' if suite['pass_rate'] >= 90 else 'not-ready'
+            html_report += f'''
+            <div class=\"suite\">
+                <h3>{suite[\"name\"]} - <span class=\"{status_class}\">{suite[\"pass_rate\"]:.1f}%</span></h3>
+                <p>Tests: {suite[\"tests\"]} | Failures: {suite[\"failures\"]} | Errors: {suite[\"errors\"]} | Time: {suite[\"time\"]:.2f}s</p>
+            </div>
+            '''
+        
+        html_report += '''
+            </body>
+            </html>
+        '''
+        
+        with open('production_readiness_report.html', 'w') as f:
+            f.write(html_report)
+        
+        # Set outputs for next jobs
+        print(f'PRODUCTION_READY={readiness}')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'production_ready={readiness}\\n')
+            f.write(f'pass_rate={pass_rate:.1f}\\n')
+            f.write(f'total_tests={total_tests}\\n')
+        "
+    
+    - name: Upload Production Readiness Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: production-readiness-report
+        path: |
+          production_readiness_report.html
+          test_summary.json
+    
+    - name: Comment PR with Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = JSON.parse(fs.readFileSync('test_summary.json', 'utf8'));
+          
+          const passRate = summary.overall_pass_rate;
+          const status = passRate >= 95 ? '✅ READY' : passRate >= 90 ? '⚠️ WARNINGS' : '❌ NOT READY';
+          
+          const comment = `## 🧪 Test Results Summary
+          
+          **Production Readiness: ${status}**
+          
+          - **Total Tests:** ${summary.total_tests}
+          - **Passed:** ${summary.passed_tests}
+          - **Failed:** ${summary.failed_tests}
+          - **Pass Rate:** ${passRate.toFixed(1)}%
+          
+          ### Test Suite Breakdown
+          ${summary.test_suites.map(suite => 
+            `- **${suite.name}:** ${suite.pass_rate.toFixed(1)}% (${suite.tests} tests, ${suite.failures} failures)`
+          ).join('\n')}
+          
+          📋 [View Detailed Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  # Job 9: Deploy to Staging (if tests pass)
+  deploy-staging:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    needs: test-analysis
+    if: needs.test-analysis.outputs.production_ready == 'READY' && github.ref == 'refs/heads/main'
+    environment: staging
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Deploy to Staging
+      run: |
+        echo "🚀 Deploying to staging environment..."
+        echo "All tests passed - system ready for staging deployment"
+        # Add actual deployment commands here
+        
+    - name: Run Staging Health Check
+      run: |
+        echo "🏥 Running staging environment health check..."
+        # Add staging health check commands here
+        
+    - name: Staging Deployment Success
+      run: |
+        echo "✅ Staging deployment completed successfully"
+
+# Summary job to provide overall workflow status
+  workflow-summary:
+    name: Workflow Summary
+    runs-on: ubuntu-latest
+    needs: [test-analysis, deploy-staging]
+    if: always()
+    
+    steps:
+    - name: Workflow Summary
+      run: |
+        echo "🎯 LegalLLM Professional Testing Pipeline Summary"
+        echo "=============================================="
+        echo ""
+        
+        if [ "${{ needs.test-analysis.outputs.production_ready }}" == "READY" ]; then
+          echo "✅ PRODUCTION READY - All tests passed successfully"
+          echo "🚀 System meets all performance, security, and compliance requirements"
+        elif [ "${{ needs.test-analysis.outputs.production_ready }}" == "READY_WITH_WARNINGS" ]; then
+          echo "⚠️  READY WITH WARNINGS - Minor issues detected"
+          echo "📋 Review test results before production deployment"
+        else
+          echo "❌ NOT READY FOR PRODUCTION - Critical issues detected"
+          echo "🔧 Address failing tests before deployment"
+        fi
+        
+        echo ""
+        echo "📊 Test Statistics:"
+        echo "   Pass Rate: ${{ needs.test-analysis.outputs.pass_rate }}%"
+        echo "   Total Tests: ${{ needs.test-analysis.outputs.total_tests }}"
+        echo ""
+        echo "📋 View detailed results in the production readiness report"

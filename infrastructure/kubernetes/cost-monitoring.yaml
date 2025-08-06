@@ -1,0 +1,374 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-cost-monitor
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-cost-monitor
+  template:
+    metadata:
+      labels:
+        app: ai-cost-monitor
+        component: monitoring
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: cost-monitor
+        image: legalai-cost-monitor:latest
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: metrics
+          protocol: TCP
+        env:
+        - name: DAILY_BUDGET
+          value: "100.0"
+        - name: MONTHLY_BUDGET
+          value: "2500.0"
+        - name: AUTO_SWITCH_ENABLED
+          value: "true"
+        - name: ALERT_WEBHOOK_URL
+          value: "https://alerts.legalai.local/webhook"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: legalai-secrets
+              key: database-url
+        - name: SMTP_HOST
+          value: "smtp.legalai.local"
+        - name: SMTP_PORT
+          value: "587"
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: cost-monitor-secrets
+              key: smtp-username
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cost-monitor-secrets
+              key: smtp-password
+        - name: PROMETHEUS_METRICS_PORT
+          value: "9090"
+        volumeMounts:
+        - name: cost-data
+          mountPath: /app/data
+        - name: cost-logs
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: cost-data
+        persistentVolumeClaim:
+          claimName: cost-monitor-data
+      - name: cost-logs
+        persistentVolumeClaim:
+          claimName: cost-monitor-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-cost-monitor-svc
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+  selector:
+    app: ai-cost-monitor
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cost-monitor-data
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cost-monitor-logs
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: logging
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cost-monitor-secrets
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: configuration
+type: Opaque
+data:
+  # Base64 encoded SMTP credentials
+  smtp-username: Y29zdF9tb25pdG9yQGxlZ2FsYWkubG9jYWw=  # cost_monitor@legalai.local
+  smtp-password: c210cF9wYXNzd29yZF9jaGFuZ2VfbWU=  # smtp_password_change_me
+  webhook-secret: d2ViaG9va19zZWNyZXRfY2hhbmdlX21l  # webhook_secret_change_me
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-monitor-config
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: configuration
+data:
+  config.yaml: |
+    # AI Cost Monitor Configuration
+    monitoring:
+      daily_budget: 100.0
+      monthly_budget: 2500.0
+      auto_switch_enabled: true
+      
+    # Alert Configuration
+    alerts:
+      - alert_id: "daily_50"
+        level: "info"
+        threshold_percentage: 50.0
+        enabled: true
+        channels: ["email"]
+        cooldown_hours: 4
+        
+      - alert_id: "daily_75"
+        level: "warning"
+        threshold_percentage: 75.0
+        enabled: true
+        channels: ["email", "webhook"]
+        cooldown_hours: 2
+        
+      - alert_id: "daily_90"
+        level: "critical"
+        threshold_percentage: 90.0
+        enabled: true
+        channels: ["email", "webhook", "sms"]
+        cooldown_hours: 1
+        
+      - alert_id: "daily_100"
+        level: "emergency"
+        threshold_percentage: 100.0
+        enabled: true
+        channels: ["email", "webhook", "sms"]
+        cooldown_hours: 0
+        
+      - alert_id: "monthly_80"
+        level: "warning"
+        threshold_percentage: 80.0
+        enabled: true
+        channels: ["email"]
+        cooldown_hours: 24
+        
+      - alert_id: "monthly_95"
+        level: "critical"
+        threshold_percentage: 95.0
+        enabled: true
+        channels: ["email", "webhook"]
+        cooldown_hours: 12
+        
+      - alert_id: "monthly_100"
+        level: "emergency"
+        threshold_percentage: 100.0
+        enabled: true
+        channels: ["email", "webhook", "sms"]
+        cooldown_hours: 0
+    
+    # Cost Optimization
+    optimization:
+      expensive_query_threshold: 10.0
+      high_usage_user_threshold: 50.0
+      firm_budget_warning_threshold: 0.8
+      
+      # Model alternatives for cost reduction
+      cheaper_alternatives:
+        "gpt-4": "gpt-3.5-turbo"
+        "gpt-4-turbo": "gpt-3.5-turbo"
+        "claude-3-opus": "claude-3-haiku"
+        "claude-3-sonnet": "claude-3-haiku"
+    
+    # Compliance
+    compliance:
+      australian_privacy_act: true
+      iso27001_logging: true
+      retention_days: 2557  # 7 years
+      audit_all_cost_events: true
+    
+    # Pricing (per 1K tokens)
+    pricing:
+      openai:
+        "gpt-4-turbo":
+          input: 0.01
+          output: 0.03
+        "gpt-4":
+          input: 0.03
+          output: 0.06
+        "gpt-3.5-turbo":
+          input: 0.001
+          output: 0.002
+      
+      groq:
+        "llama2-70b-4096":
+          input: 0.0007
+          output: 0.0008
+        "mixtral-8x7b-32768":
+          input: 0.0002
+          output: 0.0002
+        "gemma-7b-it":
+          input: 0.00015
+          output: 0.00015
+      
+      anthropic:
+        "claude-3-opus":
+          input: 0.015
+          output: 0.075
+        "claude-3-sonnet":
+          input: 0.003
+          output: 0.015
+        "claude-3-haiku":
+          input: 0.00025
+          output: 0.00125
+      
+      ollama:
+        "llama3":
+          input: 0.0
+          output: 0.0
+        "llama2":
+          input: 0.0
+          output: 0.0
+        "codellama":
+          input: 0.0
+          output: 0.0
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-cost-monitor
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: ai-cost-monitor
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-cost-alerts
+  namespace: legalai-hub
+  labels:
+    app: ai-cost-monitor
+    component: alerting
+spec:
+  groups:
+  - name: ai-cost-alerts
+    rules:
+    - alert: DailyBudgetExceeded
+      expr: ai_cost_daily_budget_usage_percentage > 100
+      for: 0s
+      labels:
+        severity: critical
+        component: ai-cost-monitor
+      annotations:
+        summary: "Daily AI cost budget exceeded"
+        description: "Firm {{ $labels.firm_id }} has exceeded daily budget: {{ $value }}%"
+    
+    - alert: MonthlyBudgetWarning
+      expr: ai_cost_monthly_budget_usage_percentage > 80
+      for: 5m
+      labels:
+        severity: warning
+        component: ai-cost-monitor
+      annotations:
+        summary: "Monthly AI cost budget warning"
+        description: "Firm {{ $labels.firm_id }} has used {{ $value }}% of monthly budget"
+    
+    - alert: HighCostQuery
+      expr: ai_cost_query_cost_usd > 10
+      for: 0s
+      labels:
+        severity: warning
+        component: ai-cost-monitor
+      annotations:
+        summary: "High cost AI query detected"
+        description: "Query cost ${{ $value }} exceeds threshold for user {{ $labels.user_id }}"
+    
+    - alert: CostMonitorDown
+      expr: up{job="ai-cost-monitor"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: ai-cost-monitor
+      annotations:
+        summary: "AI Cost Monitor is down"
+        description: "The AI cost monitoring service has been down for more than 1 minute"
