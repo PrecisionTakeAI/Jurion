@@ -57,4 +57,4 @@ build/
 *.bak
 *.backup
 *~
-backup_*/
+backup_*/aws-deployment/eksctl.exe
